@@ -1,0 +1,68 @@
+name: Release
+
+# Publishes a release when the addon version in the TOC files has no release yet.
+# The release notes are the body of the latest commit message (empty body = no notes).
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'FetaFondue/**'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the version and check both TOC files agree
+        id: version
+        run: |
+          V1="$(grep -m1 '^## Version:' FetaFondue/FetaFondue.toc | sed 's/^## Version: *//' | tr -d '\r')"
+          V2="$(grep -m1 '^## Version:' FetaFondue/FetaFondue_Camelot.toc | sed 's/^## Version: *//' | tr -d '\r')"
+          if [ -z "$V1" ] || [ "$V1" != "$V2" ]; then
+            echo "TOC versions differ or are missing: '$V1' / '$V2'"
+            exit 1
+          fi
+          echo "version=$V1" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this version is already released
+        id: exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Release v${{ steps.version.outputs.version }} already exists, nothing to do."
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the zip
+        if: steps.exists.outputs.found == 'false'
+        run: zip -r "FetaFondue-${{ steps.version.outputs.version }}.zip" FetaFondue -x '*.DS_Store'
+
+      - name: Take the release notes from the commit message body
+        if: steps.exists.outputs.found == 'false'
+        run: git log -1 --format=%b "$GITHUB_SHA" | sed '/./,$!d' > notes.txt
+
+      - name: Create the release
+        if: steps.exists.outputs.found == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" \
+            "FetaFondue-${{ steps.version.outputs.version }}.zip" \
+            --target "$GITHUB_SHA" \
+            --title "v${{ steps.version.outputs.version }}" \
+            --notes-file notes.txt
