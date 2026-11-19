@@ -8,6 +8,7 @@ local DEFAULTS = {
     openOnLogin = false,    -- open the main window at login (off unless the player turns it on)
     welcomeSeen = false,   -- the first-run welcome screen has been shown
     debug = false,
+    instanceSend = false, -- test setting (/ff instancesend): try to send addon messages inside dungeons and raids. The game refuses them (tested 1.0.1), so it stays off.
     minimap = { angle = 215 },
     mine = {},        -- my characters on this account: [guid] = { name, guild, profs = { [key] = {...} } }
     guilds = {},      -- [guildName] = { members = { [guid] = { name, profs, seen } } }
@@ -195,7 +196,7 @@ ns.Squash = Squash
 -- is not part of a code stay.
 local function StripCodes(text)
     return (text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|H.-|h", ""):gsub("|h", "")
-        :gsub("|T.-|t", ""):gsub("|A.-|a", ""):gsub("|K.-|k", ""))
+        :gsub("|T.-|t", ""):gsub("|A.-|a", ""):gsub("|K.-|k", ""):gsub("|[nN]", " "))
 end
 function ns.CleanText(text, keepLayout)
     text = tostring(text or "")
@@ -204,7 +205,7 @@ function ns.CleanText(text, keepLayout)
     if keepLayout then
         return (text:gsub("[%z\1-\8\11-\31\127]", " "))
     end
-    return (text:gsub("|[nN]", " "):gsub("|", ""):gsub("%c", " "))
+    return (text:gsub("|", ""):gsub("%c", " "))
 end
 
 -- the names this character goes by: with and without a realm part ("Name-Realm")
@@ -291,14 +292,27 @@ end
 ---------------------------------------------------------------------------
 -- Sending (addon messages)
 ---------------------------------------------------------------------------
--- The game blocks addon chat in dungeons (and in combat there). Sync.lua holds its queue
--- while this is true and carries on once we are back out.
+-- Is sending addon chat held back right now? The game's own chat lockdown always holds it, and so does being inside a dungeon or raid: the game
+-- refuses addon messages sent from inside an instance (tested in 1.0.1: the send came back refused, while receiving works fine). The messages
+-- wait in the queue and go out after we leave. The test setting "instanceSend" (/ff instancesend, off by default) makes the addon try anyway;
+-- when the game refuses, the message is kept and sending stops until we are out (ns.instRefused). /ff instance shows what happened.
+ns.instStats = { ok = 0, refused = 0, received = 0 }
+ns.instRefused = false
+function ns.InInstance()
+    local inside = false
+    pcall(function() inside = IsInInstance() and true or false end)
+    return inside
+end
 function ns.IsMessagingBlocked()
     if C_ChatInfo and C_ChatInfo.InChatMessagingLockdown and C_ChatInfo.InChatMessagingLockdown() then
         return true
     end
-    local inInstance = IsInInstance()
-    return inInstance and true or false
+    if not ns.InInstance() then
+        ns.instRefused = false
+        return false
+    end
+    if ns.instRefused then return true end
+    return not (ns.DB and ns.DB.instanceSend == true)
 end
 
 -- Returns "ok", "throttled" (try again later) or "dropped".
@@ -306,6 +320,7 @@ function ns.RawSend(msg, channel, target)
     local fn = (C_ChatInfo and C_ChatInfo.SendAddonMessage) or SendAddonMessage
     if not fn then return "dropped" end
     local ok, res = pcall(fn, ns.PREFIX, msg, channel, target)
+    ns.lastSendCode = ok and tostring(res) or ("error: " .. tostring(res))
     if not ok then return "dropped" end
     if res == 3 or res == 8 or res == 10 then return "throttled" end -- addon / channel / chat throttle
     if type(res) == "number" and res ~= 0 then return "dropped" end
@@ -856,10 +871,16 @@ end
 
 function ns.CHAT_MSG_ADDON(prefix, text, channel, sender)
     if prefix ~= ns.PREFIX or type(text) ~= "string" then return end
+    ns.heardFrom = ns.heardFrom or {}
+    ns.heardFrom[ns.Squash((tostring(sender):gsub("%-.*$", "")))] = { t = GetTime(), kind = text:sub(1, 2), inside = ns.InInstance() }
+    if ns.InInstance() then ns.instStats.received = ns.instStats.received + 1 end
     ns.Sync.OnMessage(text, sender, channel)
 end
 
-local function Scan() ns.Professions.ScheduleScan() end
+local function Scan()
+    ns.Professions.ScheduleScan()
+    if ns.Specs and ns.Specs.OnWindow then ns.Specs.OnWindow() end
+end
 ns.TRADE_SKILL_SHOW = Scan
 ns.TRADE_SKILL_LIST_UPDATE = Scan
 ns.TRADE_SKILL_DATA_SOURCE_CHANGED = Scan
@@ -1037,6 +1058,31 @@ SlashCmdList["FETAFONDUE"] = function(input)
         ns.Sync.Hello()
         ns.Print("Sharing your professions and asking the guild for theirs.")
         ns.Print(("Messages from guildmates dropped because they came in too fast: %d."):format(ns.Sync.Dropped()))
+    elseif cmd == "instance" then
+        local st = ns.instStats
+        local rest = (input or ""):match("^%s*%S+%s+(.-)%s*$") or ""
+        if rest == "reset" then
+            st.ok, st.refused, st.received, ns.instRefused, ns.lastSendCode, ns.heardFrom = 0, 0, 0, false, nil, {}
+            ns.Print("Instance counters cleared.")
+            return
+        end
+        local who = rest and rest ~= "" and ns.Squash(rest) or nil
+        if who then
+            local h = ns.heardFrom and ns.heardFrom[who]
+            if h then
+                ns.Print(("Last message from %s: %d s ago (type %s). I was %s when it arrived."):format(rest, math.floor(GetTime() - h.t), h.kind, h.inside and "inside an instance" or "outside"))
+            else
+                ns.Print(("No message from %s since the counters were cleared."):format(rest))
+            end
+            return
+        end
+        ns.Print(("Inside an instance: %s. Sending held back now: %s. Setting (/ff instancesend): %s."):format(
+            tostring(ns.InInstance()), tostring(ns.IsMessagingBlocked()), (ns.DB.instanceSend == true) and "try to send" or "hold back (default)"))
+        ns.Print(("Sent inside instances and accepted: %d. Refused by the game: %d. Last result code of a send: %s."):format(st.ok, st.refused, tostring(ns.lastSendCode)))
+        ns.Print(("Messages received while inside an instance: %d. Messages waiting to be sent: %d. /ff instance <name> shows when somebody was last heard."):format(st.received, ns.Sync.QueueLength and ns.Sync.QueueLength() or -1))
+    elseif cmd == "instancesend" then
+        DB.instanceSend = not (DB.instanceSend == true)
+        ns.Print("Sending inside dungeons and raids: " .. (DB.instanceSend and "try (test)" or "held back until you are out"))
     elseif cmd == "debug" then
         DB.debug = not DB.debug
         ns.Print("Debug output: " .. (DB.debug and "ON" or "OFF"))

@@ -114,6 +114,19 @@ local function Pump()
         ns.After(2, Pump)
         return
     end
+    local inside = ns.InInstance and ns.InInstance()
+    if inside and ns.instStats then
+        if result == "ok" then
+            ns.instStats.ok = ns.instStats.ok + 1
+        elseif result == "dropped" then
+            -- the game refuses to send from inside an instance: keep the message, stop trying until we are out (IsMessagingBlocked)
+            ns.instStats.refused = ns.instStats.refused + 1
+            ns.instRefused = true
+            table.insert(queue, 1, item)
+            ns.After(5, Pump)
+            return
+        end
+    end
     counters.outN = counters.outN + 1
     ns.After(0.4, Pump)
 end
@@ -1994,3 +2007,4 @@ function S.Dropped() return counters.dropped end
 
 -- for tests
 S._queueLength = function() return #queue end
+S.QueueLength = S._queueLength

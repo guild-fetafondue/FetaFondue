@@ -2,6 +2,8 @@ name: Release
 
 # Publishes a release when the addon version in the TOC files has no release yet.
 # The release notes are the body of the latest commit message (empty body = no notes).
+# After the release the same zip is uploaded to CurseForge, when it is set up (see the last step). A failed CurseForge
+# upload never undoes the GitHub release.
 
 on:
   push:
@@ -11,6 +13,11 @@ on:
       - 'FetaFondue/**'
       - '.github/workflows/release.yml'
   workflow_dispatch:
+    inputs:
+      list_curseforge_versions:
+        description: 'Only print the CurseForge game versions with their ids (to find the id of the Forever client)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -20,7 +27,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  curseforge-versions:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.list_curseforge_versions }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print the CurseForge game versions
+        env:
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+        run: |
+          if [ -z "$CF_API_KEY" ]; then echo "The secret CF_API_KEY is not set."; exit 1; fi
+          curl --fail-with-body -sS -H "X-Api-Token: $CF_API_KEY" https://wow.curseforge.com/api/game/versions > versions.json
+          echo "--- matches for forever / 16001 / 1.60 ---"
+          jq -r '.[] | "\(.id)\t\(.name)"' versions.json | grep -iE 'forever|16001|1\.60' || echo "(none)"
+          echo "--- all versions (id, type id, name) ---"
+          jq -r '.[] | "\(.id)\t\(.gameVersionTypeID)\t\(.name)"' versions.json
+
   release:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.list_curseforge_versions) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,3 +89,53 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "v${{ steps.version.outputs.version }}" \
             --notes-file notes.txt
+
+      # CurseForge: only when set up. Needs the secret CF_API_KEY (the author API token) and the repository variables
+      # CF_PROJECT_ID (the project's number) and CF_GAME_VERSIONS (the game version(s), comma separated: a name like 1.60.1,
+      # which is looked up at CurseForge, or the numeric id).
+      # Anything missing: the step says so and does nothing. A failure here leaves the GitHub release as it is.
+      - name: Upload the zip to CurseForge
+        if: steps.exists.outputs.found == 'false'
+        continue-on-error: true
+        env:
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          CF_PROJECT_ID: ${{ vars.CF_PROJECT_ID }}
+          CF_GAME_VERSIONS: ${{ vars.CF_GAME_VERSIONS }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -z "$CF_API_KEY" ] || [ -z "$CF_PROJECT_ID" ] || [ -z "$CF_GAME_VERSIONS" ]; then
+            echo "CurseForge is not set up (CF_API_KEY, CF_PROJECT_ID, CF_GAME_VERSIONS): skipped."
+            exit 0
+          fi
+          # the game versions: a number is taken as the id, a name is looked up (it has to match exactly one version)
+          curl --fail-with-body -sS -H "X-Api-Token: ${CF_API_KEY}" https://wow.curseforge.com/api/game/versions > versions.json
+          IDS=""
+          IFS=',' read -ra ITEMS <<< "$CF_GAME_VERSIONS"
+          for RAW in "${ITEMS[@]}"; do
+            ITEM="$(echo "$RAW" | xargs)"
+            if [[ "$ITEM" =~ ^[0-9]+$ ]]; then
+              ID="$ITEM"
+            else
+              MATCHES="$(jq -r --arg n "$ITEM" '[.[] | select(.name == $n) | .id] | map(tostring) | join(" ")' versions.json)"
+              COUNT="$(echo "$MATCHES" | wc -w)"
+              if [ "$COUNT" -ne 1 ]; then
+                echo "The game version '$ITEM' matches $COUNT versions at CurseForge ($MATCHES). Put the numeric id in CF_GAME_VERSIONS instead."
+                jq -r '.[] | "\(.id)\t\(.gameVersionTypeID)\t\(.name)"' versions.json | grep -iF "$ITEM" || true
+                exit 1
+              fi
+              ID="$MATCHES"
+            fi
+            echo "Game version '$ITEM' -> id $ID"
+            IDS="${IDS:+$IDS,}$ID"
+          done
+          jq -n \
+            --arg changelog "$(cat notes.txt)" \
+            --arg name "FetaFondue $VERSION" \
+            --argjson versions "[${IDS}]" \
+            '{changelog: $changelog, changelogType: "markdown", displayName: $name, gameVersions: $versions, releaseType: "release"}' > metadata.json
+          curl --fail-with-body -sS -X POST "https://wow.curseforge.com/api/projects/${CF_PROJECT_ID}/upload-file" \
+            -H "X-Api-Token: ${CF_API_KEY}" \
+            -F "metadata=<metadata.json" \
+            -F "file=@FetaFondue-${VERSION}.zip"
+          echo
+          echo "Uploaded FetaFondue-${VERSION}.zip to CurseForge project ${CF_PROJECT_ID}."

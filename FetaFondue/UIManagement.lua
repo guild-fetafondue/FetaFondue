@@ -83,10 +83,18 @@ inviteCancel:SetScript("OnClick", function() inviteWin:Hide() end)
 inviteGo:SetScript("OnClick", function()
     local name = (inviteBox:GetText() or ""):gsub("^%s+", ""):gsub("%s+$", "")
     if name == "" or ns.Blacklist.Find(name) or not CanInviteNow() then return end      -- (checked again: never invite a listed name)
-    pcall(function()
-        if C_GuildInfo and C_GuildInfo.Invite then C_GuildInfo.Invite(name) elseif GuildInvite then GuildInvite(name) end
-    end)
-    ns.Print("Guild invite sent to " .. name .. ".")
+    -- the game forbids addons to send a guild invite themselves (tested 1.0.1: "action forbidden"), but the player may: the chat line
+    -- is filled in and the player presses Enter
+    local line = "/ginvite " .. name
+    local opened = false
+    pcall(function() if ChatFrame_OpenChat then ChatFrame_OpenChat(line) opened = true end end)
+    if not opened then
+        pcall(function()
+            local box = ChatEdit_ChooseBoxForSend and ChatEdit_ChooseBoxForSend() or (DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.editBox)
+            if box then ChatEdit_ActivateChat(box) box:SetText(line) opened = true end
+        end)
+    end
+    if not opened then ns.Print("Type this in the chat to invite: " .. line) end
     inviteWin:Hide()
 end)
 local function NewBox(parent, x, y, w, h)
@@ -216,9 +224,6 @@ local function Arrow(button, up)
 end
 Arrow(upButton, true)
 Arrow(downButton, false)
-local sharedHint = page:Text("GameFontDisableSmall", 606, -542, 194)
-sharedHint:SetWordWrap(true)
-sharedHint:SetText("Shared with all officers who use the addon")
 
 local SelectNote   -- (below)
 local RefreshList   -- (below)
@@ -406,7 +411,7 @@ colBy:SetText("Added by")
 local colReason = blPage:Text("GameFontNormalSmall", 430, -98, 330)
 colReason:SetText("Reason")
 local blBox = NewBox(blPage, 0, -116, 800, 408)
-local blCount = blPage:Text("GameFontDisableSmall", 0, -566, 300)
+local blCount = blPage:Text("GameFontDisableSmall", 560, -98, 240, "RIGHT")      -- (top right, above the list)
 
 local selected = nil     -- normalized name of the selected row
 

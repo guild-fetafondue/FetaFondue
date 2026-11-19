@@ -192,7 +192,9 @@ function S.TimeText(seconds)
 end
 
 -- read the cooldowns of my own character. Known recipes that are on a long cooldown are added to the list.
-function S.ScanOwn()
+-- skipDiscovery: only read the cooldowns that are known (the cheap part). The discovery of new cooldown recipes asks the game about every recipe
+-- I know, so it runs at login, after a craft of a recipe and when a profession window opens, not on every refresh.
+function S.ScanOwn(skipDiscovery)
     local own = ns.GetOwn()
     if not own or not ns.worldReady or not ns.DB then return end
     local inCombat = false
@@ -206,7 +208,7 @@ function S.ScanOwn()
         for _, id in ipairs(p.ids or {}) do known[id] = key end
     end
     -- discovery
-    for id, key in pairs(known) do
+    for id, key in pairs(skipDiscovery and {} or known) do
         if not db.cdSpells[id] and not S.SEED[id] then
             local start, duration = Cooldown(id)
             if start > 0 and duration >= MIN_DISCOVER then db.cdSpells[id] = key end
@@ -242,25 +244,48 @@ function S.ScanOwn()
     end
 end
 
-local scanQueued = false
-function S.ScheduleScan(delay)
+local scanQueued, scanDiscover = false, false
+function S.ScheduleScan(delay, discover)
+    if discover then scanDiscover = true end
     if scanQueued then return end
     scanQueued = true
     ns.After(delay or 2, function()
         scanQueued = false
-        S.ScanOwn()
+        local skip = not scanDiscover
+        scanDiscover = false
+        S.ScanOwn(skip)
     end)
+end
+
+-- the recipes I know as a set: a cast is looked up in it in one step (it used to walk the whole list of every profession for every cast).
+-- It is rebuilt when a profession window opens, and at the latest every five minutes.
+local recipeSet, recipeSetAt = nil, -1e9
+function S.InvalidateRecipes() recipeSet = nil end
+local function Recipes(own)
+    local now = ns.Now()
+    if recipeSet and now - recipeSetAt < 300 then return recipeSet end
+    recipeSet, recipeSetAt = {}, now
+    for _, p in pairs(own.profs or {}) do
+        for _, id in ipairs(p.ids or {}) do recipeSet[id] = true end
+    end
+    return recipeSet
 end
 
 -- a spell of mine went off: when it is a recipe, its cooldown may have started
 function S.OnCast(spellID)
     local own = ns.GetOwn()
     if not own or not ns.worldReady then return end
-    for _, p in pairs(own.profs or {}) do
-        for _, id in ipairs(p.ids or {}) do
-            if id == spellID then S.ScheduleScan(1.5) return end
-        end
-    end
+    if Recipes(own)[spellID] then S.ScheduleScan(1.5, true) end
+end
+
+-- a profession window opened (or its list changed): look for new cooldown recipes, at most every five minutes
+local lastWindowScan = -1e9
+function S.OnWindow()
+    S.InvalidateRecipes()
+    local now = ns.Now()
+    if now - lastWindowScan < 300 then return end
+    lastWindowScan = now
+    S.ScheduleScan(4, true)
 end
 
 -- listing for the Cooldowns tab: { { key, name, rows = { { guid, member, spell, left } } } }, each list by the least time left
@@ -292,9 +317,11 @@ end
 
 -- the first time after the world is ready, and then every ten minutes
 function S.Start()
+    local first = true
     local function Loop()
         S.ReadOwn()
-        S.ScanOwn()
+        S.ScanOwn(not first)           -- (new cooldown recipes are looked for at login, not every ten minutes)
+        first = false
         ns.After(600, Loop)
     end
     Loop()

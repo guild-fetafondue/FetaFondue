@@ -97,7 +97,8 @@ function B.Apply(name, reason, addedAt, gone, rev, by)
     local store = Store()
     if not store then return false end
     -- (these come from other players' addons as well: no colour codes, links or line breaks)
-    name, reason, by = ns.CleanText(name), ns.CleanText(reason), by and ns.CleanText(by)
+    name, by = ns.CleanText(name), by and ns.CleanText(by)
+    reason = ns.CleanText(reason, true):gsub("[\r\n]+", " ")       -- (a reason may hold a "|" that is not a code)
     local key = B.Normalize(name)
     if key == "" then return false end
     local old = store[key]
