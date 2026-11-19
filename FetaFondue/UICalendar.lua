@@ -38,7 +38,7 @@ function ns.UI.RaidTooltip(owner, rec)
     if organizer then GameTooltip:AddLine("Organized by " .. organizer, 0.8, 0.8, 0.8) end
     if rec.desc and rec.desc ~= "" then GameTooltip:AddLine(rec.desc, 0.9, 0.9, 0.9, true) end
     GameTooltip:AddLine(" ")
-    GameTooltip:AddLine(R.SignedText(rec), 1, 0.82, 0)
+    GameTooltip:AddLine(R.SignedText(rec, true, "|cffffd100"), 1, 0.82, 0)
     local others = R.OthersText(rec)
     if others ~= "" then GameTooltip:AddLine((others:gsub("^%l", string.upper)), 0.7, 0.7, 0.7) end
     -- melee, ranged and the rest of the damage dealers are all DPS; the characters are shown, not the Discord names
@@ -48,7 +48,15 @@ function ns.UI.RaidTooltip(owner, rec)
     for _, s in ipairs(rec.signups or {}) do
         if s.st == "signed" then
             local list = byRole[roleOf[s.r] or "O"]
-            list[#list + 1] = R.CharName(s.n, roster)
+            -- class colors; my own character is green
+            local entry = R.CharEntry(s.n, roster)
+            local name = R.CharName(s.n, roster)
+            if entry and entry.guid and ns.IsMine(entry.guid) then
+                name = "|cff66ff66" .. name .. "|r"
+            elseif entry and entry.class then
+                name = K.ClassColored(name, entry.class)
+            end
+            list[#list + 1] = name
         end
     end
     for _, role in ipairs({ { "T", "Tanks" }, { "H", "Healers" }, { "D", "DPS" }, { "O", "Other" } }) do
@@ -192,7 +200,7 @@ local function RenderEventRow(row, item)
     -- "20:00  Onyxia  organized by Emiron, 8 signed up (3 tanks, 3 healers, 2 damage)"
     local organizer = (rec.org and rec.org ~= "" and rec.org) or (rec.leader ~= "" and rec.leader) or nil
     local signed = R.Counts(rec).signed
-    local breakdown = R.SignedText(rec):match("%((.*)%)$")
+    local breakdown = R.SignedText(rec, true, "|cff999999"):match("%((.*)%)$")
     local people = signed > 0 and ("%d signed up%s"):format(signed, breakdown and (" (" .. breakdown .. ")") or "") or "nobody signed up yet"
     row.text:SetText(("%s  |cff%s%s|r  %s"):format(Gray(ev.time), RAID_COLOR, rec.title,
         Gray((organizer and ("organized by " .. organizer .. ", ") or "") .. people)))

@@ -547,13 +547,20 @@ function R.Counts(rec)
 end
 
 -- "Signed up: 24 (3 tanks, 6 healers, 15 damage)"
-function R.SignedText(rec)
+-- colored: the number and the word of tanks, healers and dps get the role colors (the ones of Analytics and the player window);
+-- resume: what to write after each colored part to go back to the text's own color (the "|r" ends all colors)
+function R.SignedText(rec, colored, resume)
     local c = R.Counts(rec)
     if c.signed == 0 then return "Nobody signed up yet" end
+    local function Paint(role, text)
+        local col = colored and ns.Inspect and ns.Inspect.ROLE_COLOR and ns.Inspect.ROLE_COLOR[role]
+        if not col then return text end
+        return "|c" .. col .. text .. "|r" .. (resume or "")
+    end
     local parts = {}
-    if c.tanks > 0 then parts[#parts + 1] = c.tanks .. (c.tanks == 1 and " tank" or " tanks") end
-    if c.healers > 0 then parts[#parts + 1] = c.healers .. (c.healers == 1 and " healer" or " healers") end
-    if c.damage > 0 then parts[#parts + 1] = c.damage .. " dps" end
+    if c.tanks > 0 then parts[#parts + 1] = Paint("TANK", c.tanks .. (c.tanks == 1 and " tank" or " tanks")) end
+    if c.healers > 0 then parts[#parts + 1] = Paint("HEALER", c.healers .. (c.healers == 1 and " healer" or " healers")) end
+    if c.damage > 0 then parts[#parts + 1] = Paint("DPS", c.damage .. " dps") end
     if c.other > 0 then parts[#parts + 1] = c.other .. " other" end
     return ("Signed up: %d%s"):format(c.signed, #parts > 0 and (" (" .. table.concat(parts, ", ") .. ")") or "")
 end
@@ -893,9 +900,10 @@ end
 ---------------------------------------------------------------------------
 -- the name to show for a Discord name: the character it is matched to (the main when one of several is the main of the
 -- others), or the Discord name itself when nobody is known
-function R.CharName(discord, roster)
+-- the guild member (roster entry) a sign-up name stands for, nil when it matches nobody
+function R.CharEntry(discord, roster)
     local list = R.ResolveAll(discord, roster)
-    if #list == 0 then return discord end
+    if #list == 0 then return nil end
     local set = {}
     for _, e in ipairs(list) do set[e.guid or ""] = e end
     local pick = list[1]
@@ -903,6 +911,12 @@ function R.CharName(discord, roster)
         local o = e.guid and ns.GetOriginalOf and ns.GetOriginalOf(e.guid)
         if o and set[o] then pick = set[o] break end
     end
+    return pick
+end
+
+function R.CharName(discord, roster)
+    local pick = R.CharEntry(discord, roster)
+    if not pick then return discord end
     local name = ns.DisplayName(pick.name or "")
     return (name ~= "") and name or discord
 end

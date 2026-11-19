@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: FetaFondue
 ## Notes: Guild addon for FetaFondue: who is online and where, guild stats, and the Sweatshop (who can craft what, requests), events and inspect.
-## Version: 1.0.3
+## Version: 1.0.4
 ## OptionalDeps: ProfessionMaster
 ## SavedVariables: FetaFondueDB
 
