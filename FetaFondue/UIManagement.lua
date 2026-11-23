@@ -19,7 +19,7 @@ header:SetText("Management")
 -- empty to type one). A name on the shitlist shows a warning and cannot be invited from here.
 ---------------------------------------------------------------------------
 local inviteWin = K.NewWindow("FetaFondueGuildInvite", 400, 214)
-inviteWin:SetFrameStrata("FULLSCREEN_DIALOG")
+inviteWin:SetFrameStrata(K.STRATA_ALERT)
 inviteWin:SetPoint("CENTER", UIParent, "CENTER", 0, 60)
 inviteWin:SetMovable(true)
 inviteWin:RegisterForDrag("LeftButton")
@@ -110,13 +110,16 @@ end
 -- pages under small tabs: the notes, the shitlist and the scheduling
 local page = K.NewPanel("FetaFondueNotesPage", panel, 800, 590)
 page:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, 0)
-page:Show()
+page:Hide()
 local blPage = K.NewPanel("FetaFondueBlacklistPage", panel, 800, 590)
 blPage:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, 0)
 blPage:Hide()
 local schedPage = K.NewPanel("FetaFondueSchedulingPage", panel, 800, 590)
 schedPage:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, 0)
-schedPage:Hide()
+schedPage:Show()
+local inactPage = K.NewPanel("FetaFondueInactivePage", panel, 800, 590)
+inactPage:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, 0)
+inactPage:Hide()
 
 ---------------------------------------------------------------------------
 -- Notes: one big note on the left; on the right the list of notes (click one to open it). The note "Important!" is always
@@ -758,15 +761,95 @@ removeRaidButton:SetScript("OnClick", function()
 end)
 
 ---------------------------------------------------------------------------
+-- the Inactive page: characters that have not been online for 30 days (a main and his alts are judged together). Right-click a row:
+-- kick (fills the chat line, the game does not let addons kick) or ignore. The ignored ones are listed on the right, to take them off again.
+---------------------------------------------------------------------------
+local inactIntro = inactPage:Text("GameFontDisableSmall", 0, -66, 800)
+inactIntro:SetText("Characters that haven't been online in the last 30 days.")
+local inactCount = inactPage:Text("GameFontNormalSmall", 12, -98, 300)
+local ignoredCount = inactPage:Text("GameFontNormalSmall", 548, -98, 240)
+local inactBox = NewBox(inactPage, 0, -116, 530, 440)
+local ignoredBox = NewBox(inactPage, 544, -116, 256, 440)
+
+local function InactiveRow(row, item)
+    if not row.cName then
+        row.cName = row:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+        row.cName:SetPoint("LEFT", row, "LEFT", 12, 0)
+        row.cName:SetJustifyH("LEFT")
+        row.cName:SetWordWrap(false)
+        row.cRank = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+        row.cRank:SetJustifyH("LEFT")
+        row.cRank:SetWordWrap(false)
+        row.cDays = row:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+        row.cDays:SetJustifyH("RIGHT")
+    end
+    row.text:SetText("")
+    local wide = item.wide
+    row.cName:SetWidth(wide and 170 or 120)
+    row.cRank:ClearAllPoints()
+    row.cDays:ClearAllPoints()
+    if wide then
+        row.cRank:SetPoint("LEFT", row, "LEFT", 200, 0)
+        row.cRank:SetWidth(180)
+        row.cDays:SetPoint("RIGHT", row, "RIGHT", -12, 0)
+    else
+        row.cRank:SetText("")
+        row.cDays:SetPoint("RIGHT", row, "RIGHT", -12, 0)
+    end
+    row.cDays:SetWidth(90)
+    if item.note then
+        row.cName:SetText(Gray(item.note)) row.cRank:SetText("") row.cDays:SetText("")
+        row.onClick, row.onRightClick = nil, nil
+        return
+    end
+    local r = item.rec
+    row.cName:SetText(K.ClassColored(r.name, r.class))
+    if wide then row.cRank:SetText(Gray(r.rank or "")) end
+    row.cDays:SetText(r.days == nil and Gray("?") or (r.days == 0 and Gray("recent") or (r.days .. (r.days == 1 and " day" or " days"))))
+    row.onRightClick = function()
+        local entries = {}
+        if item.ignoredList then
+            entries[1] = { text = "Stop ignoring", action = function() ns.UnignoreInactive(r.guid) ns.UI.RefreshInactive() end }
+        else
+            if CanGuildRemove and CanGuildRemove() then
+                -- addons may not kick: the chat line is filled in, the officer presses Enter
+                entries[#entries + 1] = { text = "|cffff5050Guild kick|r", action = function() K.OpenChatWith("/gkick " .. r.fullName) end }
+            end
+            entries[#entries + 1] = { text = "Ignore", action = function() ns.IgnoreInactive(r.guid) ns.UI.RefreshInactive() end }
+        end
+        K.OpenMenu(K.ClassColored(r.name, r.class), entries)
+    end
+end
+local inactList = K.CreateScrollList(inactBox, 530 - 8 - 28, 440 - 16, 26, InactiveRow, { stripes = true })
+inactList.frame:SetPoint("TOPLEFT", inactBox, "TOPLEFT", 6, -8)
+local ignoredList = K.CreateScrollList(ignoredBox, 256 - 8 - 28, 440 - 16, 26, InactiveRow, { stripes = true })
+ignoredList.frame:SetPoint("TOPLEFT", ignoredBox, "TOPLEFT", 6, -8)
+
+function ns.UI.RefreshInactive()
+    local inactive, ignored = ns.GetInactiveMembers(30)
+    local items = {}
+    for _, r in ipairs(inactive) do items[#items + 1] = { rec = r, wide = true } end
+    if #items == 0 then items[1] = { note = "Nobody.", wide = true } end
+    inactList:Render(items, true)
+    inactCount:SetText("Inactive (" .. #inactive .. ")")
+    local ig = {}
+    for _, r in ipairs(ignored) do ig[#ig + 1] = { rec = r, ignoredList = true } end
+    if #ig == 0 then ig[1] = { note = "Nobody is ignored." } end
+    ignoredList:Render(ig, true)
+    ignoredCount:SetText("Ignored (" .. #ignored .. ")")
+end
+
+---------------------------------------------------------------------------
 -- the two small tabs on top
 ---------------------------------------------------------------------------
 -- real tabs: each one has its own outline (left, top, right) standing on a thin line; the open tab is lighter and has the
 -- gold line below it, on the base line
 local tabStrip = K.NewTabStrip(panel, -30)
-local chatTab = tabStrip:AddTab(0, "Notes")
+local schedTab = tabStrip:AddTab(0, "Scheduling")
 local blTab = tabStrip:AddTab(116, "Shitlist")
-local schedTab = tabStrip:AddTab(232, "Scheduling")
-local currentSub = "notes"
+local inactTab = tabStrip:AddTab(232, "Inactive")
+local chatTab = tabStrip:AddTab(348, "Notes")
+local currentSub = "scheduling"
 
 local function ShowSub(id)
     if currentSub == "notes" and id ~= "notes" then FlushSave() end     -- (what was typed is saved before the page is left)
@@ -774,7 +857,8 @@ local function ShowSub(id)
     page:SetShown(id == "notes")
     blPage:SetShown(id == "blacklist")
     schedPage:SetShown(id == "scheduling")
-    for tab, which in pairs({ [chatTab] = "notes", [blTab] = "blacklist", [schedTab] = "scheduling" }) do
+    inactPage:SetShown(id == "inactive")
+    for tab, which in pairs({ [chatTab] = "notes", [blTab] = "blacklist", [schedTab] = "scheduling", [inactTab] = "inactive" }) do
         if which == id then tab:LockHighlight() else tab:UnlockHighlight() end
     end
     if id == "notes" then
@@ -782,6 +866,8 @@ local function ShowSub(id)
     elseif id == "blacklist" then
         ResetRemove()
         ns.UI.RefreshBlacklist()
+    elseif id == "inactive" then
+        ns.UI.RefreshInactive()
     else
         ResetRaidRemove()
         ShowPreview()
@@ -791,6 +877,7 @@ end
 chatTab:SetScript("OnClick", function() ShowSub("notes") end)
 blTab:SetScript("OnClick", function() ShowSub("blacklist") end)
 schedTab:SetScript("OnClick", function() ShowSub("scheduling") end)
+inactTab:SetScript("OnClick", function() ShowSub("inactive") end)
 
 -- the tab was selected
 function ns.UI.OnManagementShown()

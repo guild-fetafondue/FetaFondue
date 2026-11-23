@@ -12,6 +12,15 @@ local function Commas(n)
     local out = str:reverse():gsub("(%d%d%d)", "%1,"):reverse()
     return (out:gsub("^,", ""))
 end
+-- a big number short: 9,999 stays, 10,000 is "10k", 10,140 "10.1k", 1,250,000 "1.3M" (one decimal, a ".0" is left out)
+local function Short(n)
+    n = math.floor(tonumber(n) or 0)
+    if n < 10000 then return Commas(n) end
+    local unit, tenths = "k", math.floor(n / 100 + 0.5)
+    if tenths >= 10000 then unit, tenths = "M", math.floor(n / 100000 + 0.5) end
+    if tenths % 10 == 0 then return ("%d%s"):format(tenths / 10, unit) end
+    return ("%d.%d%s"):format(math.floor(tenths / 10), tenths % 10, unit)
+end
 local function Plural(n, one, many) return n == 1 and one or many end
 -- "just now", "5 minutes ago", "3 hours ago", "2 days ago" for a unix time
 local function AgeText(at)
@@ -212,11 +221,19 @@ local function NewEditBox(name, parent)
     return e
 end
 
+-- The layers (frame strata) of everything we draw, set in this one place:
+--  * WINDOW: our normal windows. The same layer as the game's own windows (character, bags, talents...), so whichever was clicked
+--    last is in front, and the game's windows can be put over ours.
+--  * ALERT: what needs your attention (version reminder, shitlist warning, raid reminder, the small dialogs, toasts): always on top.
+local STRATA_WINDOW, STRATA_ALERT = "MEDIUM", "FULLSCREEN_DIALOG"
+
 -- Flat window: dark rectangle, thin border, a slim title bar with the title and an X.
 local function NewWindow(name, width, height, noEsc)
     local frame = CreateFrame("Frame", name, UIParent, "BackdropTemplate")
     frame:SetSize(width, height)
-    frame:SetFrameStrata("DIALOG")
+    frame:SetFrameStrata(STRATA_WINDOW)
+    pcall(frame.SetToplevel, frame, true)                                  -- a click brings it to the front of its layer
+    frame:HookScript("OnShow", function(self) pcall(self.Raise, self) end) -- so does opening it
     frame:SetClampedToScreen(true)
     frame:EnableMouse(true)
     frame:SetBackdrop(BOX_BACKDROP)
@@ -570,7 +587,7 @@ local function CreateScrollList(parent, width, height, rowHeight, renderRow, opt
     -- slim scroll bar to the right of the list
     local track = CreateFrame("Frame", nil, parent)
     track:SetSize(6, height)
-    if opts.insideTrack then
+    if opts.insideTrack or opts.fitTrack then
         track:SetPoint("TOPRIGHT", sf, "TOPRIGHT", -1, 0)        -- (on top of the end of the rows: they reach the end of the box)
         track:SetFrameLevel(sf:GetFrameLevel() + 5)
     else
@@ -587,8 +604,11 @@ local function CreateScrollList(parent, width, height, rowHeight, renderRow, opt
     thumbTex:SetColorTexture(0.4, 0.4, 0.43, 1)
     track:Hide()
 
+    local content
     local function UpdateThumb()
         local range = tonumber(sf:GetVerticalScrollRange()) or 0
+        -- fitTrack: the rows reach the end of the list, and stop short of the scroll bar when one is needed
+        if opts.fitTrack and content then content:SetWidth(range > 0 and (width - 8) or width) end
         if range <= 0 then track:Hide() return end
         track:Show()
         local thumbH = math.max(24, height * height / (height + range))
@@ -615,7 +635,7 @@ local function CreateScrollList(parent, width, height, rowHeight, renderRow, opt
 
     sf:SetSize(width, height)
 
-    local content = CreateFrame("Frame", nil, sf)
+    content = CreateFrame("Frame", nil, sf)
     content:SetSize(width, 1)
     sf:SetScrollChild(content)
 
@@ -862,6 +882,9 @@ ns.K = {
     Gold = Gold,
     Gray = Gray,
     Commas = Commas,
+    Short = Short,
+    STRATA_WINDOW = STRATA_WINDOW,
+    STRATA_ALERT = STRATA_ALERT,
     Plural = Plural,
     AgeText = AgeText,
     InstallLayoutHelpers = InstallLayoutHelpers,

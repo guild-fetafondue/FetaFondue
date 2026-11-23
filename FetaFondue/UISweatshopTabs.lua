@@ -83,26 +83,27 @@ specList.frame:SetPoint("TOPLEFT", specPage.box, "TOPLEFT", 6, -8)
 local function BuildSpecItems()
     local S = ns.Specs
     local items = {}
+    -- only what somebody in the guild has: a profession, a specialization or a character without one is not shown at all
     for _, key in ipairs(S.ORDER) do
-        local specs = S.SpecsOf(key)
-        if #specs > 0 then
+        local sections = {}
+        for _, id in ipairs(S.SpecsOf(key)) do
+            local holders = S.Holders(id)
+            if #holders > 0 then sections[#sections + 1] = { id = id, holders = holders } end
+        end
+        if #sections > 0 then
             items[#items + 1] = { height = 30, font = "GameFontNormalLarge", indent = 6,
                 text = ("|T%s:20|t  %s"):format(ProfIcon(key), ns.Professions.ProfessionName(key)) }
-            for _, id in ipairs(specs) do
-                local holders = S.Holders(id)
-                local icon = S.SpecIcon(id)
+            for _, sec in ipairs(sections) do
+                local icon = S.SpecIcon(sec.id)
                 items[#items + 1] = { height = 24, font = "GameFontNormal", indent = 22,
-                    text = ("%s%s  %s"):format(icon and ("|T" .. icon .. ":16|t  ") or "", (S.SpecName(id)),
-                        Gray("(" .. #holders .. ")")) }
-                if #holders == 0 then
-                    items[#items + 1] = { text = Gray("Nobody yet"), font = "GameFontDisableSmall", indent = 44 }
-                end
-                for _, h in ipairs(holders) do
+                    text = ("%s%s  %s"):format(icon and ("|T" .. icon .. ":16|t  ") or "", (S.SpecName(sec.id)),
+                        Gray("(" .. #sec.holders .. ")")) }
+                for _, h in ipairs(sec.holders) do
                     local _, online, level = ClassOf(h.guid)
-                    local extra = {}
-                    if level then extra[#extra + 1] = "level " .. level end
-                    if online then extra[#extra + 1] = "online" end
-                    items[#items + 1] = { text = CharName(h.guid, h.member) .. (#extra > 0 and ("  " .. Gray(table.concat(extra, ", "))) or ""), indent = 44 }
+                    local text = CharName(h.guid, h.member)
+                    if level then text = text .. "  " .. Gray("level " .. level) end
+                    text = text .. "  " .. (online and "|cff4cff4conline|r" or Gray("offline"))
+                    items[#items + 1] = { text = text, indent = 44 }
                 end
             end
         end
@@ -116,9 +117,10 @@ end
 ---------------------------------------------------------------------------
 local cdPage = NewPage()
 K.sweatshopCooldownPage = cdPage
-local cdTitle = cdPage:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-cdTitle:SetPoint("TOPLEFT", cdPage, "TOPLEFT", 0, -2)
-cdTitle:SetText("Profession cooldowns, the shortest wait first")
+-- (no heading above the list: the box takes the whole page)
+cdPage.box:ClearAllPoints()
+cdPage.box:SetPoint("TOPLEFT", cdPage, "TOPLEFT", 0, 0)
+cdPage.box:SetSize(800, 586)
 
 local function CooldownRow(row, item)
     if item.kind ~= "cd" then
@@ -135,17 +137,82 @@ local function CooldownRow(row, item)
     row.text:SetPoint("RIGHT", row, "RIGHT", -8, 0)
     row.text:SetText(CharName(item.guid, item.member) .. "  " .. Gray(item.spellName))
 end
-local cdList = K.CreateScrollList(cdPage.box, 800 - 12, 562 - 16, 22, CooldownRow, { stripes = true, insideTrack = true })
+local cdList = K.CreateScrollList(cdPage.box, 800 - 12, 586 - 16, 22, CooldownRow, { stripes = true, insideTrack = true })
 cdList.frame:SetPoint("TOPLEFT", cdPage.box, "TOPLEFT", 6, -8)
+
+-- the icon of a spell (the game's own picture of it), nil when the game does not give one
+local function SpellIcon(id)
+    local tex
+    pcall(function()
+        if C_Spell and C_Spell.GetSpellTexture then tex = C_Spell.GetSpellTexture(id)
+        elseif GetSpellTexture then tex = GetSpellTexture(id) end
+    end)
+    return tex
+end
+
+-- the font of the Alchemy groups: a size between the profession title (16) and the rows (12); if the game refuses, the large white one
+local subheadFont
+local function SubheadFont()
+    if subheadFont == nil then
+        subheadFont = "GameFontHighlightLarge"
+        if CreateFont then
+            local ok, obj = pcall(function()
+                local f = CreateFont("FetaFondueSubheadFont")
+                f:CopyFontObject("GameFontHighlight")
+                local path, _, flags = f:GetFont()
+                if not path then error("no font") end
+                f:SetFont(path, 14, flags or "")
+                return f
+            end)
+            if ok and obj then subheadFont = obj end
+        end
+    end
+    return subheadFont
+end
+
+-- the icon of an item, nil when the game does not give one
+local function ItemIcon(id)
+    local tex
+    pcall(function()
+        if C_Item and C_Item.GetItemIconByID then tex = C_Item.GetItemIconByID(id)
+        elseif GetItemIcon then tex = GetItemIcon(id) end
+    end)
+    return tex
+end
 
 local function BuildCooldownItems()
     local S = ns.Specs
     local items = {}
+    local function Add(r) items[#items + 1] = { kind = "cd", guid = r.guid, member = r.member, left = r.left, spellName = S.CooldownName(r.spell) } end
     for _, g in ipairs(S.ListByProfession()) do
         items[#items + 1] = { height = 30, font = "GameFontNormalLarge", indent = 6,
             text = ("|T%s:20|t  %s  %s"):format(ProfIcon(g.key), g.name, Gray("(" .. #g.rows .. ")")) }
-        for _, r in ipairs(g.rows) do
-            items[#items + 1] = { kind = "cd", guid = r.guid, member = r.member, left = r.left, spellName = S.CooldownName(r.spell) }
+        if g.key == "171" then
+            -- Alchemy: one group per kind of transmute (a group with nobody ready or waiting is simply not there), the groups in alphabetical
+            -- order, inside a group the shortest wait first
+            local cats, order = {}, {}
+            for _, r in ipairs(g.rows) do
+                local name = S.TransmuteGroup(r.spell, S.CooldownName(r.spell))
+                if not cats[name] then cats[name] = {} order[#order + 1] = name end
+                cats[name][#cats[name] + 1] = r
+            end
+            table.sort(order)
+            for _, name in ipairs(order) do
+                local rows = cats[name]
+                table.sort(rows, function(a, b)
+                    if a.left ~= b.left then return a.left < b.left end
+                    if a.spell ~= b.spell then return a.spell < b.spell end
+                    return (a.member.name or "") < (b.member.name or "")
+                end)
+                local iconSpell = S.TRANSMUTE_ICON[name]
+                local itemId = S.TRANSMUTE_ITEM_ICON[name]
+                local icon = (itemId and ItemIcon(itemId)) or (iconSpell and SpellIcon(iconSpell)) or ProfIcon(g.key)
+                items[#items + 1] = { height = 24, font = SubheadFont(), indent = 22,
+                    text = ("|T%s:16|t  %s  %s"):format(icon, name, Gray("(" .. #rows .. ")")) }
+                for _, r in ipairs(rows) do Add(r) end
+            end
+        else
+            for _, r in ipairs(g.rows) do Add(r) end
         end
     end
     if #items == 0 then
@@ -153,6 +220,8 @@ local function BuildCooldownItems()
     end
     return items
 end
+
+ns.UI.CooldownItems = BuildCooldownItems       -- (for the tests)
 
 ---------------------------------------------------------------------------
 -- switching

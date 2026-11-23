@@ -9,7 +9,6 @@ local NewWindow, CreateScrollList, Gray = K.NewWindow, K.CreateScrollList, K.Gra
 -- automatic guess.
 ---------------------------------------------------------------------------
 local win = NewWindow("FetaFondueAltPicker", 380, 500)
-win:SetFrameStrata("FULLSCREEN_DIALOG")
 win:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
 win:SetMovable(true)
 win:RegisterForDrag("LeftButton")

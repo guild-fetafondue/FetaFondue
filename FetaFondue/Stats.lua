@@ -186,7 +186,7 @@ function ns.GetOnlineMembers(includeOffline)
             local originalShown = originalName and ns.DisplayName(originalName) or nil
             out[#out + 1] = {
                 altOf = originalShown and originalShown:match("^(%S+)") or nil, altOfFull = originalShown, altSource = altSource,
-                online = e.online and true or false,
+                online = e.online and true or false, offlineFor = e.offlineFor,
                 name = ns.DisplayName(e.name), fullName = e.name, guid = e.guid, level = e.level, class = e.class,
                 classDisplay = e.classDisplay, rank = e.rank, zone = e.zone, note = e.note,
                 afk = IsAFK(e.status), kind = ZoneKind(e.zone), profs = ns.GetProfessionList(e.guid),
@@ -194,12 +194,73 @@ function ns.GetOnlineMembers(includeOffline)
             }
         end
     end
-    -- the ones who are online first (all of them are when offline guildies are not asked for)
+    -- the ones who are online first, alphabetical; then the offline ones, the most recently seen first (somebody whose last time
+    -- online is unknown comes last), alphabetical among those seen equally long ago
     table.sort(out, function(a, b)
         if a.online ~= b.online then return a.online end
+        if not a.online then
+            local fa, fb = a.offlineFor or math.huge, b.offlineFor or math.huge
+            if fa ~= fb then return fa < fb end
+        end
+        local la, lb = a.name:lower(), b.name:lower()
+        if la ~= lb then return la < lb end
         return a.name < b.name
     end)
     return out
+end
+
+-- Members who have not been online for `days` days or more (default 30), for the Inactive tab of Management. A main and all his alts are
+-- judged together: when any of them was online (or is not known to have been away that long) none of them is listed. Somebody
+-- the game gives no last-online time for is never listed. Returns the inactive ones and the ones the officer chose to ignore,
+-- each { guid, name, fullName, class, rank, rankIndex, days, offlineFor }, the longest away first.
+-- The ignore list is this officer's own (gd.inactiveIgnore[guid] = true); a character who left the guild is dropped from it.
+function ns.GetInactiveMembers(days)
+    local limit = (days or 30) * 86400
+    local roster = ns.GetRoster()
+    local gd = ns.DB and ns.DB.guilds and ns.DB.guilds[ns.guildName]
+    local inactive, ignored = {}, {}
+    if not gd or roster.total < 1 then return inactive, ignored end
+    gd.inactiveIgnore = gd.inactiveIgnore or {}
+    for guid in pairs(gd.inactiveIgnore) do
+        if not roster.byGUID[guid] then gd.inactiveIgnore[guid] = nil end
+    end
+    local function Key(guid) return ns.GetOriginalOf(guid) or guid end
+    local familyActive = {}
+    for _, e in ipairs(roster.list) do
+        if e.guid and (e.online or e.offlineFor == nil or e.offlineFor < limit) then familyActive[Key(e.guid)] = true end
+    end
+    for _, e in ipairs(roster.list) do
+        if e.guid and not e.online and e.offlineFor and e.offlineFor >= limit then
+            local rec = { guid = e.guid, name = ns.DisplayName(e.name), fullName = e.name, class = e.class, rank = e.rank, rankIndex = e.rankIndex,
+                          days = math.floor(e.offlineFor / 86400), offlineFor = e.offlineFor }
+            if gd.inactiveIgnore[e.guid] then
+                ignored[#ignored + 1] = rec
+            elseif not familyActive[Key(e.guid)] then
+                inactive[#inactive + 1] = rec
+            end
+        elseif e.guid and gd.inactiveIgnore[e.guid] then
+            -- ignored, but online or recently seen: still shown in the ignored section so it can be taken off
+            ignored[#ignored + 1] = { guid = e.guid, name = ns.DisplayName(e.name), fullName = e.name, class = e.class, rank = e.rank, rankIndex = e.rankIndex,
+                                      days = e.online and 0 or (e.offlineFor and math.floor(e.offlineFor / 86400) or nil), offlineFor = e.offlineFor or 0 }
+        end
+    end
+    local function Order(a, b)
+        if a.offlineFor ~= b.offlineFor then return a.offlineFor > b.offlineFor end
+        return a.name:lower() < b.name:lower()
+    end
+    table.sort(inactive, Order)
+    table.sort(ignored, Order)
+    return inactive, ignored
+end
+
+function ns.IgnoreInactive(guid)
+    local gd = ns.DB.guilds[ns.guildName]
+    gd.inactiveIgnore = gd.inactiveIgnore or {}
+    gd.inactiveIgnore[guid] = true
+end
+function ns.UnignoreInactive(guid)
+    local gd = ns.DB.guilds[ns.guildName]
+    if gd.inactiveIgnore then gd.inactiveIgnore[guid] = nil end
 end
 
 -- The highest level in the guild (online or not) and everybody who has it: level, { {name, class}, ... }
@@ -289,18 +350,31 @@ function ns.GetRoleDistribution()
         known, unknown = 24, 3
     else
         for _, c in ipairs(KnownCharacters()) do
-            local role
-            local code = c.m.role
-            if code and code ~= "" then role = ns.Inspect and ns.Inspect.CODE_ROLE[code]
-            elseif ns.DB.inspect and ns.DB.inspect[c.guid] and ns.Inspect then
-                local _, r = ns.Inspect.RoleOfProfile(ns.DB.inspect[c.guid])
-                role = r
+            -- every talent setup counts (dual specialization: both), a role once per character
+            local roles, any = {}, false
+            local function AddRole(role)
+                role = ns.Inspect and ns.Inspect.BaseRole(role) or role          -- Feral tank = tank; Feral, DPS and hybrid count with the damage dealers
+                if role and rows[role] and not roles[role] then roles[role] = true any = true end
             end
-            if role == "FERAL" then role = "DPS" end          -- Feral can tank or deal damage: counted with damage
-            if role and rows[role] then
-                rows[role].count = (rows[role].count or 0) + 1
-                table.insert(rows[role].names, c.name)
-                table.insert(rows[role].classes, c.class or "")
+            if c.m.setups and #c.m.setups > 0 then
+                for _, sp in ipairs(c.m.setups) do
+                    if sp.role and sp.role ~= "" then AddRole(ns.Inspect and ns.Inspect.CODE_ROLE[sp.role]) end
+                end
+            end
+            if not any then
+                local code = c.m.role
+                if code and code ~= "" then AddRole(ns.Inspect and ns.Inspect.CODE_ROLE[code])
+                elseif ns.DB.inspect and ns.DB.inspect[c.guid] and ns.Inspect then
+                    local _, r = ns.Inspect.RoleOfProfile(ns.DB.inspect[c.guid])
+                    AddRole(r)
+                end
+            end
+            if any then
+                for role in pairs(roles) do
+                    rows[role].count = (rows[role].count or 0) + 1
+                    table.insert(rows[role].names, c.name)
+                    table.insert(rows[role].classes, c.class or "")
+                end
                 known = known + 1
             else
                 unknown = unknown + 1
@@ -328,16 +402,26 @@ function ns.GetSpecDistribution()
         return { { label = "Fury Warrior", count = 5, names = {}, classes = {}, class = "WARRIOR" }, { label = "Frost Mage", count = 4, names = {}, classes = {}, class = "MAGE" } }, 9, 3, 5, {}, {}
     end
     for _, c in ipairs(KnownCharacters()) do
-        local tree = c.m.tree
-        if (not tree or tree == "") and ns.Inspect and ns.DB.inspect and ns.DB.inspect[c.guid] then tree = ns.Inspect.TreeOfProfile(ns.DB.inspect[c.guid]) end
-        if tree and tree ~= "" then
+        -- every talent setup counts (dual specialization: both), the same tree twice only once
+        local trees, seen = {}, {}
+        for _, sp in ipairs(c.m.setups or {}) do
+            if sp.tree and sp.tree ~= "" and not seen[sp.tree] then seen[sp.tree] = true trees[#trees + 1] = sp.tree end
+        end
+        if #trees == 0 then
+            local tree = c.m.tree
+            if (not tree or tree == "") and ns.Inspect and ns.DB.inspect and ns.DB.inspect[c.guid] then tree = ns.Inspect.TreeOfProfile(ns.DB.inspect[c.guid]) end
+            if tree and tree ~= "" then trees[1] = tree end
+        end
+        if #trees > 0 then
             local class = (LOCALIZED_CLASS_NAMES_MALE and c.class and LOCALIZED_CLASS_NAMES_MALE[c.class]) or (c.class and (c.class:sub(1, 1) .. c.class:sub(2):lower())) or ""
-            local label = class ~= "" and (tree .. " " .. class) or tree
-            local r = rows[label]
-            if not r then r = { label = label, count = 0, names = {}, classes = {}, class = c.class } rows[label] = r order[#order + 1] = r end
-            r.count = r.count + 1
-            table.insert(r.names, c.name)
-            table.insert(r.classes, c.class or "")
+            for _, tree in ipairs(trees) do
+                local label = class ~= "" and (tree .. " " .. class) or tree
+                local r = rows[label]
+                if not r then r = { label = label, count = 0, names = {}, classes = {}, class = c.class } rows[label] = r order[#order + 1] = r end
+                r.count = r.count + 1
+                table.insert(r.names, c.name)
+                table.insert(r.classes, c.class or "")
+            end
             known = known + 1
         else
             unknown = unknown + 1

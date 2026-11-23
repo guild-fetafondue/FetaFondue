@@ -265,6 +265,9 @@ function K.RequestRowRenderer(opts)
         row.onClick = function()
             if Shifted() then
                 LinkRecipe(r.id, r.name, r.qty)
+            elseif item.canFulfill and not (IsControlKeyDown and IsControlKeyDown()) then
+                -- a request I can craft: the profession window opens on it with the amount in, I press Create
+                ns.Professions.OpenToCraft(r.id, r.qty, r.name)
             elseif opts.onOpen then
                 opts.onOpen(r, item)
             end
@@ -275,7 +278,12 @@ function K.RequestRowRenderer(opts)
             if item.canFulfill then hint[#hint + 1] = "|cff40ff40You can craft this!|r" end
             if prof and prof.name then hint[#hint + 1] = prof.name .. (prof.skill and (", skill " .. prof.skill) or "") end
             hint[#hint + 1] = "Requested by " .. who
-            hint[#hint + 1] = K.Key("Click") .. ": show it in the Sweatshop"
+            if item.canFulfill then
+                hint[#hint + 1] = K.Key("Click") .. ": open it in your profession"
+                hint[#hint + 1] = K.Key("Ctrl-click") .. ": show it in the Sweatshop"
+            else
+                hint[#hint + 1] = K.Key("Click") .. ": show it in the Sweatshop"
+            end
             hint[#hint + 1] = K.Key("Shift-click") .. ": link in chat"
             if CanDeleteRequest(r) then hint[#hint + 1] = K.Key("Right-click") .. ": delete" end
             ShowRecipeHover(rw, r.id, r.name, hint, r.qty)

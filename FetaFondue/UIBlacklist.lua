@@ -12,7 +12,7 @@ local BLOCK_H = 112
 local MAX_SHOWN = 3
 
 local warn = NewWindow("FetaFondueBlacklistWarning", 440, 200)
-warn:SetFrameStrata("FULLSCREEN_DIALOG")
+warn:SetFrameStrata(K.STRATA_ALERT)
 warn:SetPoint("CENTER", UIParent, "CENTER", 0, 80)
 warn:SetMovable(true)
 warn:RegisterForDrag("LeftButton")
@@ -101,7 +101,7 @@ end
 -- Add / change an entry (officers and the guild master)
 ---------------------------------------------------------------------------
 local edit = NewWindow("FetaFondueBlacklistEdit", 480, 262)
-edit:SetFrameStrata("FULLSCREEN_DIALOG")
+edit:SetFrameStrata(K.STRATA_ALERT)
 edit:SetPoint("CENTER", UIParent, "CENTER", 0, 40)
 edit:SetMovable(true)
 edit:RegisterForDrag("LeftButton")

@@ -46,8 +46,65 @@ I.ROLES = {
     WARLOCK = { "DPS", "DPS", "DPS" },
     DRUID = { "DPS", "FERAL", "HEALER" },   -- Feral can be played as a tank or as damage
 }
-I.ROLE_LABEL = { TANK = "Tank", HEALER = "Healer", DPS = "DPS", FERAL = "Tank or DPS" }
-I.ROLE_COLOR = { TANK = "ff4a9fff", HEALER = "ff40ff40", DPS = "ffff5050", FERAL = "ffffa040" }
+I.ROLE_LABEL = { TANK = "Tank", HEALER = "Healer", DPS = "DPS", FERAL = "Feral", FERAL_TANK = "Feral Tank", FERAL_DPS = "Feral DPS", FERAL_HYBRID = "Feral Hybrid" }
+I.ROLE_COLOR = { TANK = "ff4a9fff", HEALER = "ff40ff40", DPS = "ffff5050", FERAL = "ffffa040", FERAL_TANK = "ff4a9fff", FERAL_DPS = "ffff5050", FERAL_HYBRID = "ffffa040" }
+
+-- Feral druids (level 60 and the two talents that decide it; below 60 or with neither: plain "Feral"):
+--   Primal Bite and Shifting Power -> Feral Hybrid; Primal Bite only -> Feral Tank; Shifting Power only -> Feral DPS
+-- The talents are found by the NAME of their spell in the game's own language, or by spell id (I.FERAL_SPELLS: add the ids here so that it also
+-- works on French and German clients; without them those clients simply show plain "Feral").
+I.FERAL_LEVEL = 60
+I.FERAL_SPELLS = { bite = {}, shifting = {} }          -- [spellId] = true
+local FERAL_NAMES = { bite = "Primal Bite", shifting = "Shifting Power" }
+
+local spellNames = {}
+local function SpellNameOf(id)
+    if not id or id <= 0 then return nil end
+    if spellNames[id] then return spellNames[id] end
+    local name
+    pcall(function()
+        if C_Spell and C_Spell.GetSpellName then name = C_Spell.GetSpellName(id)
+        elseif C_Spell and C_Spell.GetSpellInfo then
+            local info = C_Spell.GetSpellInfo(id)
+            name = type(info) == "table" and info.name or nil
+        elseif GetSpellInfo then name = (GetSpellInfo(id)) end
+    end)
+    if type(name) == "string" and name ~= "" then spellNames[id] = name return name end
+    return nil
+end
+
+-- has the setup points in Primal Bite / in Shifting Power? (nil, nil when the layout is not known)
+function I.FeralTalents(profile, sp)
+    sp = sp or (profile and I.ActiveSetup(profile))
+    if not profile or not sp or (sp.spec or 0) <= 0 then return nil, nil end
+    local layout = I.GetLayout(sp.spec, profile.level)
+    if not layout then return nil, nil end
+    local bite, shifting = false, false
+    for _, n in ipairs(layout.nodes) do
+        if ((sp.ranks or {})[n.id] or 0) > 0 then
+            local name = SpellNameOf(n.spell)
+            if I.FERAL_SPELLS.bite[n.spell or 0] or (name and name == FERAL_NAMES.bite) then bite = true end
+            if I.FERAL_SPELLS.shifting[n.spell or 0] or (name and name == FERAL_NAMES.shifting) then shifting = true end
+        end
+    end
+    return bite, shifting
+end
+
+function I.FeralRole(profile, sp)
+    if not profile or (profile.level or 0) < I.FERAL_LEVEL then return "FERAL" end
+    local bite, shifting = I.FeralTalents(profile, sp)
+    if bite and shifting then return "FERAL_HYBRID" end
+    if bite then return "FERAL_TANK" end
+    if shifting then return "FERAL_DPS" end
+    return "FERAL"
+end
+
+-- how a role counts in the tank / healer / damage numbers (Analytics, the planner): the hybrid and a plain Feral with the damage dealers
+function I.BaseRole(role)
+    if role == "FERAL_TANK" then return "TANK" end
+    if role == "FERAL" or role == "FERAL_DPS" or role == "FERAL_HYBRID" then return "DPS" end
+    return role
+end
 
 -- points: { points in the 1st tree, 2nd, 3rd } -> name of the main tree, role (nil while levelling: under 5 points)
 function I.RoleFor(classFile, points)
@@ -341,19 +398,40 @@ local function InspectedSpecID(unit)
     return id
 end
 
+-- Which of the two talent groups (dual specialization: 1 = Primary, 2 = Secondary) is active right now; nil when the game does not say.
+local function ActiveGroup()
+    local g
+    pcall(function()
+        local info = C_SpecializationInfo
+        g = info and info.GetActiveSpecGroup and info.GetActiveSpecGroup()
+        if type(g) ~= "number" and GetActiveTalentGroup then g = GetActiveTalentGroup() end
+    end)
+    if type(g) == "number" and g >= 1 and g <= 2 then return g end
+    return nil
+end
+
 -- The talent setups of MY character: the active one, and (dual specialization) the other one.
--- Each: { spec = specialization id, ranks = { [nodeID] = rank }, active = true/false }.
--- The other setup is read from the game's saved talent configs of the class (unverified on WoW Forever
--- until somebody with dual specialization runs /ff talentprobe).
+-- Each: { spec = specialization id, ranks = { [nodeID] = rank }, active = true/false, group = 1 or 2 }.
+-- On WoW Forever the game cannot show the talents of the group that is NOT active (the probe found no saved configs for it), so every
+-- time a group is active its talents are kept (ns.DB.talentGroups[guid][group]); the other group is then the copy from the last time it
+-- was active. (Saved talent configs, when a client has them, are used first.)
 local function CaptureOwnSpecs(level)
     local specs = {}
     if not ns.worldReady then return specs end       -- not right at login (see ns.worldReady in Core.lua)
     local specID = OwnSpecID() or 0
     local active = ActiveConfigID()
     if not active then return specs end
-    local ranks = ReadRanks(active)
-    specs[1] = { spec = specID, ranks = ranks, active = true }
+    local ranks, rankCount = ReadRanks(active)
+    local group = ActiveGroup()
+    specs[1] = { spec = specID, ranks = ranks, active = true, group = group }
     I.GetLayout(specID, level, active)      -- my own tree is the cheapest way to learn my class's layout
+    local saved
+    if group and ns.DB and ns.myGUID then
+        ns.DB.talentGroups = ns.DB.talentGroups or {}
+        saved = ns.DB.talentGroups[ns.myGUID]
+        if not saved then saved = {} ns.DB.talentGroups[ns.myGUID] = saved end
+        if rankCount > 0 then saved[group] = { spec = specID, ranks = ranks, at = ns.Time() } end
+    end
 
     local function AddOther(configID, otherSpec)
         if #specs >= 2 or configID == active then return end
@@ -375,6 +453,13 @@ local function CaptureOwnSpecs(level)
             end
         end
     end)
+    -- the group that is not active: the copy kept from the last time it was
+    if #specs < 2 and group and saved and saved[3 - group] and next(saved[3 - group].ranks or {}) ~= nil then
+        local o = saved[3 - group]
+        specs[2] = { spec = o.spec or 0, ranks = o.ranks, active = false, group = 3 - group }
+    elseif #specs >= 2 and group then
+        specs[2].group = 3 - group
+    end
     return specs
 end
 
@@ -390,6 +475,163 @@ function I.Normalize(p)
     for _, sp in ipairs(p.specs) do if sp.active then act = sp end end
     if act then p.spec, p.ranks = act.spec, act.ranks else p.spec, p.ranks = 0, {} end
     return p
+end
+
+---------------------------------------------------------------------------
+-- Character stats (what the game's character panel shows). Only MY OWN character can be read; a guildie's addon shares them
+-- with the rest of the profile. Out of combat and after worldReady only, everything inside pcall, a stat the game does not
+-- have is simply missing (and so hidden). Crit and haste exist three times (melee, ranged, spell): all three are kept and the
+-- window shows the highest one, like the game's own panel does.
+---------------------------------------------------------------------------
+I.STAT_KEYS = { "ilvl", "hp", "pw", "pt", "str", "agi", "sta", "int", "spi", "ap", "rap", "cm", "cr", "cs", "hm", "hr", "hs",
+    "apen", "sdmg", "sheal", "spen", "def", "defmax", "dodge", "block", "parry", "armor" }
+local STAT_SET = {}
+for _, k in ipairs(I.STAT_KEYS) do STAT_SET[k] = true end
+
+local function Num(v)
+    if type(v) ~= "number" then return nil end
+    local secret = false
+    pcall(function() if issecretvalue and issecretvalue(v) then secret = true end end)
+    if secret or v ~= v then return nil end
+    return v
+end
+
+-- calls a global function of the game; nil when it is not there or fails. Returns up to three results.
+local function Call(name, ...)
+    local fn = _G[name]
+    if type(fn) ~= "function" then return nil end
+    local res = { pcall(fn, ...) }
+    if not res[1] then return nil end
+    return res[2], res[3], res[4]
+end
+
+-- the lowest of a per-school value over the magic schools 2..7 (holy to arcane), like the game's panel shows it
+local function LowestSchool(name)
+    local low
+    for school = 2, 7 do
+        local v = Num((Call(name, school)))
+        if v then low = low and math.min(low, v) or v end
+    end
+    return low
+end
+
+-- "Defense" skill: the game's own function when there is one, else the skill line of that name (English, French, German client)
+local DEFENSE_NAMES = { ["Defense"] = true, ["Défense"] = true, ["Defence"] = true, ["Verteidigung"] = true }
+local function DefenseSkill()
+    local base, mod = Call("UnitDefense", "player")
+    if Num(base) then
+        local level = Num(UnitLevel and UnitLevel("player")) or 0
+        return base + (Num(mod) or 0), level * 5
+    end
+    if not (GetNumSkillLines and GetSkillLineInfo) then return nil, nil end
+    local names = {}
+    for n in pairs(DEFENSE_NAMES) do names[n] = true end
+    if type(_G.DEFENSE) == "string" then names[_G.DEFENSE] = true end      -- (the game's own word for it, in the client's language)
+    -- the skills tab only lists the lines under headers that are open: open them all for a moment, then close the ones that were closed
+    local collapsed, opened = {}, false
+    pcall(function()
+        for i = 1, (GetNumSkillLines() or 0) do
+            local name, header, expanded = GetSkillLineInfo(i)
+            if header and not expanded and name then collapsed[name] = true end
+        end
+        if next(collapsed) ~= nil and ExpandSkillHeader then ExpandSkillHeader(0) opened = true end
+    end)
+    local rank, max
+    pcall(function()
+        for i = 1, (GetNumSkillLines() or 0) do
+            local name, header, _, r, _, modifier, m = GetSkillLineInfo(i)
+            if not header and names[name or ""] then
+                if Num(r) then rank = r + (Num(modifier) or 0) end
+                max = Num(m)
+                return
+            end
+        end
+    end)
+    if opened and CollapseSkillHeader then
+        pcall(function()
+            for i = (GetNumSkillLines() or 0), 1, -1 do
+                local name, header = GetSkillLineInfo(i)
+                if header and collapsed[name or ""] then CollapseSkillHeader(i) end
+            end
+        end)
+    end
+    return rank, max
+end
+
+-- average item level of what is equipped: the game's number when it has one, else the plain average of the equipped items
+local ILVL_SLOTS = { 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 }
+local function AverageItemLevel()
+    local avg, equipped = Call("GetAverageItemLevel")
+    local v = Num(equipped) or Num(avg)
+    if v and v > 0 then return v end
+    local sum, count = 0, 0
+    for _, slot in ipairs(ILVL_SLOTS) do
+        pcall(function()
+            local link = GetInventoryItemLink and GetInventoryItemLink("player", slot)
+            if not link then return end
+            local level
+            if C_Item and C_Item.GetDetailedItemLevelInfo then level = C_Item.GetDetailedItemLevelInfo(link)
+            elseif GetDetailedItemLevelInfo then level = GetDetailedItemLevelInfo(link) end
+            if not Num(level) and GetItemInfo then level = select(4, GetItemInfo(link)) end
+            level = Num(level)
+            if level and level > 0 then sum, count = sum + level, count + 1 end
+        end)
+    end
+    if count > 0 then return sum / count end
+    return nil
+end
+
+local lastStats
+function I.ReadStats()
+    if not ns.worldReady then return lastStats end
+    local inCombat = false
+    pcall(function() inCombat = InCombatLockdown and InCombatLockdown() or false end)
+    if inCombat then return lastStats end
+    local s = {}
+    local function Put(key, v, digits)
+        v = Num(v)
+        if not v or v <= 0 then return end
+        s[key] = digits and (tonumber(("%." .. digits .. "f"):format(v)) or 0) or math.floor(v + 0.5)
+    end
+    Put("ilvl", AverageItemLevel(), 2)
+    Put("hp", (Call("UnitHealthMax", "player")))
+    Put("pw", (Call("UnitPowerMax", "player")))
+    s.pt = Num((Call("UnitPowerType", "player")))
+    for i, key in ipairs({ "str", "agi", "sta", "int", "spi" }) do
+        local _, effective = Call("UnitStat", "player", i)
+        Put(key, effective)
+    end
+    for _, pair in ipairs({ { "ap", "UnitAttackPower" }, { "rap", "UnitRangedAttackPower" } }) do
+        local base, pos, neg = Call(pair[2], "player")
+        if Num(base) then Put(pair[1], base + (Num(pos) or 0) + (Num(neg) or 0)) end
+    end
+    Put("cm", (Call("GetCritChance")), 2)
+    Put("cr", (Call("GetRangedCritChance")), 2)
+    Put("cs", LowestSchool("GetSpellCritChance"), 2)
+    local hm = Num((Call("GetMeleeHaste"))) or Num((Call("GetHaste")))
+    Put("hm", hm, 2)
+    -- ranged haste: the game returns the haste and the ranged-only bonus (an ammo pouch or quiver) and its panel adds them
+    local r1, r2, r3 = Call("GetRangedHaste")
+    local hr
+    for _, v in ipairs({ Num(r1) or false, Num(r2) or false, Num(r3) or false }) do if v then hr = (hr or 0) + v end end
+    Put("hr", hr, 2)
+    Put("hs", Num((Call("GetSpellHaste"))) or hm, 2)           -- (no spell haste function seen: it matched the melee haste)
+    local penRating = type(_G.CR_ARMOR_PENETRATION) == "number" and Num((Call("GetCombatRatingBonus", _G.CR_ARMOR_PENETRATION))) or nil
+    Put("apen", Num((Call("GetArmorPenetration"))) or penRating, 2)
+    Put("sdmg", LowestSchool("GetSpellBonusDamage"))
+    Put("sheal", (Call("GetSpellBonusHealing")))
+    Put("spen", (Call("GetSpellPenetration")))
+    local def, defMax = DefenseSkill()
+    Put("def", def)
+    if s.def then Put("defmax", defMax) end
+    Put("dodge", (Call("GetDodgeChance")), 2)
+    Put("block", (Call("GetBlockChance")), 2)
+    Put("parry", (Call("GetParryChance")), 2)
+    local _, armor = Call("UnitArmor", "player")
+    Put("armor", armor)
+    if next(s) == nil then return lastStats end
+    lastStats = s
+    return s
 end
 
 -- Reads a unit: my own character ("player"), or somebody the game let us inspect (gear, and their talents
@@ -411,6 +653,7 @@ function I.Capture(unit)
     end
     if unit == "player" then
         p.specs = CaptureOwnSpecs(p.level)
+        p.stats = I.ReadStats()
     else
         p.src = "scan"
         local valid = false
@@ -485,13 +728,15 @@ end
 function I.RoleOfProfile(profile, sp)
     local points = I.TreePoints(profile, sp)
     if not points then return nil end
-    return I.RoleFor(profile.class, points)
+    local tree, role = I.RoleFor(profile.class, points)
+    if role == "FERAL" then role = I.FeralRole(profile, sp) end
+    return tree, role
 end
 
--- one letter for sharing: T, H, D (and F for Feral druids, counted with damage dealers elsewhere)
-local ROLE_CODE = { TANK = "T", HEALER = "H", DPS = "D", FERAL = "F" }
+-- one letter for sharing: T, H, D; Feral druids: F (plain), B (tank), C (damage), Y (hybrid)
+local ROLE_CODE = { TANK = "T", HEALER = "H", DPS = "D", FERAL = "F", FERAL_TANK = "B", FERAL_DPS = "C", FERAL_HYBRID = "Y" }
 I.ROLE_CODE = ROLE_CODE
-I.CODE_ROLE = { T = "TANK", H = "HEALER", D = "DPS", F = "FERAL" }
+I.CODE_ROLE = { T = "TANK", H = "HEALER", D = "DPS", F = "FERAL", B = "FERAL_TANK", C = "FERAL_DPS", Y = "FERAL_HYBRID" }
 
 -- what to share about MY character besides gear: its race and role
 function I.OwnSummary()
@@ -519,6 +764,53 @@ function I.OwnSummary()
         tree = t or ""
     end)
     return race, role, tree
+end
+
+-- My talent setups (with dual specialization two), the active one first: { { tree = "Enhancement", role = "D" (T, H, D, F or ""), active = true }, ... }.
+-- A setup whose tree cannot be told yet (fewer than 5 points: a spare setup nobody uses) is left out. nil when nothing could be read.
+-- Only after the world is ready, and read-only (see CaptureOwnSpecs).
+function I.OwnSetups()
+    if not ns.worldReady then return nil end
+    local list
+    pcall(function()
+        local _, classFile = UnitClass("player")
+        local level = UnitLevel("player") or 0
+        local specs = CaptureOwnSpecs(level)
+        if #specs == 0 then return end
+        local profile = I.Normalize({ class = classFile or "", level = level, specs = specs })
+        local order = {}
+        for _, sp in ipairs(profile.specs) do if sp.active then order[#order + 1] = sp end end
+        for _, sp in ipairs(profile.specs) do if not sp.active then order[#order + 1] = sp end end
+        list = {}
+        for _, sp in ipairs(order) do
+            local tree, role = I.RoleOfProfile(profile, sp)
+            if tree and tree ~= "" then
+                list[#list + 1] = { tree = tree, role = role and ROLE_CODE[role] or "", active = sp.active == true }
+            end
+        end
+    end)
+    return list
+end
+
+-- Keep my own tree, role and setups (own.tree, own.role, own.setups, own.setupsRev) in step with the game. Returns true when they
+-- changed (a respec, the other specialization made active, a first reading). setupsRev is the time of the last change: it travels with
+-- the setups so that an old copy never replaces a newer one. Nothing is changed when the game could not be read.
+function I.RefreshOwn()
+    local own = ns.GetOwn()
+    if not own or not ns.worldReady then return false end
+    local list = I.OwnSetups()
+    if not list or #list == 0 then return false end
+    local function Sig(setups)
+        local out = {}
+        for _, s in ipairs(setups or {}) do out[#out + 1] = (s.role or "") .. ":" .. (s.tree or "") end
+        return table.concat(out, "|")
+    end
+    local changed = Sig(list) ~= Sig(own.setups) or not own.setupsRev
+    own.setups = list
+    own.tree = list[1].tree
+    if list[1].role ~= "" then own.role = list[1].role end
+    if changed then own.setupsRev = ns.Time() end
+    return changed
 end
 
 -- the name of the talent tree with the most points of a guildmate's inspect profile (as the player details show it), or nil
@@ -593,9 +885,9 @@ function I.Store(guid, profile)
             end
             for n, sp in ipairs(old.specs) do
                 if n == bestIndex then
-                    merged.specs[#merged.specs + 1] = { spec = sp.spec, ranks = scanSpec.ranks, active = true }
+                    merged.specs[#merged.specs + 1] = { spec = sp.spec, ranks = scanSpec.ranks, active = true, group = sp.group }
                 else
-                    merged.specs[#merged.specs + 1] = { spec = sp.spec, ranks = sp.ranks, active = false }
+                    merged.specs[#merged.specs + 1] = { spec = sp.spec, ranks = sp.ranks, active = false, group = sp.group }
                 end
             end
             if scanSpec and not bestIndex then
@@ -606,6 +898,7 @@ function I.Store(guid, profile)
             profile = I.Normalize(merged)
         end
     end
+    if old and not profile.stats and old.stats then profile.stats = old.stats end   -- a scan (or an older addon) has no stats: keep what we had
     ns.DB.inspect[guid] = profile
     -- keep the saved copies few
     local count, oldest, oldestAt = 0, nil, nil
@@ -649,6 +942,26 @@ function I.Encode(p)
         local s = p.items[slot[1]]
         if s then parts[#parts + 1] = ("i%d=%s"):format(slot[1], s) end
     end
+    -- the stats: "t=key:value,key:value,..." six at a time (older addons skip the part they do not know)
+    if p.stats then
+        local pairsOut = {}
+        for _, k in ipairs(I.STAT_KEYS) do
+            local v = p.stats[k]
+            if type(v) == "number" then pairsOut[#pairsOut + 1] = k .. ":" .. tostring(v) end
+        end
+        for i = 1, #pairsOut, 6 do
+            parts[#parts + 1] = "t=" .. table.concat(pairsOut, ",", i, math.min(i + 5, #pairsOut))
+        end
+    end
+    -- which talent group (1 Primary, 2 Secondary) each setup is: "u=<group of setup 1>,<group of setup 2>" (0 = not known; older addons skip it)
+    do
+        local groups, any = {}, false
+        for n, sp in ipairs(p.specs) do
+            groups[n] = tostring(sp.group or 0)
+            if sp.group then any = true end
+        end
+        if any then parts[#parts + 1] = "u=" .. table.concat(groups, ",") end
+    end
     -- every talent setup: "s<n>=<specID>,<1 if active>" then its ranks "k<n>=id:rank,id:rank,..." a few per part
     for n, sp in ipairs(p.specs) do
         parts[#parts + 1] = ("s%d=%d,%d"):format(n, sp.spec or 0, sp.active and 1 or 0)
@@ -684,7 +997,7 @@ end
 
 function I.Decode(str)
     local p = { level = 0, race = "", class = "", items = {}, spec = 0, ranks = {}, specs = {}, src = "owner" }
-    local setups = {}
+    local setups, groupOf = {}, {}
     for part in str:gmatch("[^|]+") do
         local kind = part:sub(1, 1)
         if kind == "h" then
@@ -692,6 +1005,14 @@ function I.Decode(str)
             if level then p.level, p.race, p.class = tonumber(level), race, class end
         elseif kind == "o" then
             p.src = part:sub(3, 3) == "S" and "scan" or "owner"
+        elseif kind == "t" then
+            for key, value in part:gmatch("(%a+):([%d%.]+)") do
+                local n = tonumber(value)
+                if STAT_SET[key] and n and n >= 0 and n <= 1e8 then
+                    p.stats = p.stats or {}
+                    p.stats[key] = n
+                end
+            end
         elseif kind == "i" then
             local slot, s = part:match("^i(%d+)=([%-%d:]+)$")
             if slot and tonumber(slot) <= 30 then p.items[tonumber(slot)] = s end
@@ -707,11 +1028,22 @@ function I.Decode(str)
                     if tonumber(rank) <= 20 then setups[n].ranks[tonumber(id)] = tonumber(rank) end
                 end
             end
+        elseif kind == "u" then
+            local n = 0
+            for g in (part:match("^u=([%d,]+)$") or ""):gmatch("%d+") do
+                n = n + 1
+                if tonumber(g) == 1 or tonumber(g) == 2 then groupOf[n] = tonumber(g) end
+            end
         elseif kind == "p" then   -- older senders: the specialization id of their single setup
             local spec = tonumber(part:match("^p=(%d+)$"))
             if spec then setups[1] = setups[1] or { ranks = {}, active = true } setups[1].spec = spec end
         end
     end
-    for n = 1, 4 do if setups[n] then p.specs[#p.specs + 1] = setups[n] end end
+    for n = 1, 4 do
+        if setups[n] then
+            setups[n].group = groupOf[n]
+            p.specs[#p.specs + 1] = setups[n]
+        end
+    end
     return I.Normalize(p)
 end

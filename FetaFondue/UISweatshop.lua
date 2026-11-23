@@ -19,6 +19,9 @@ K.sweatshopRequestsPage = panel
 
 local state = { profession = nil, search = "", online = false, selected = nil, qty = 1, scrollToSelected = false }
 
+local STAR = "Interface\\TargetingFrame\\UI-RaidTargetingIcon_1"      -- the game's yellow star (raid marker 1)
+local FLAT = "Interface\\Buttons\\WHITE8X8"
+
 local COL_A_W = 176
 local COL_B_X, COL_B_W = 188, 282
 local COL_C_X, COL_C_W = 482, 318
@@ -122,6 +125,14 @@ local function BuildProfessionItems()
     end
     table.sort(list, function(a, b) return a.name < b.name end)
     table.insert(list, 1, { kind = "prof", key = nil, name = "All professions", count = all, icon = "Interface\\Icons\\INV_Misc_Book_09" })
+    -- my favourites (only when I have some; with "Online crafters only" only the ones somebody online can craft)
+    if ns.FavouriteCount() > 0 then
+        local favCount = 0
+        for rid in pairs(seen) do if ns.IsFavourite(rid) then favCount = favCount + 1 end end
+        if not (onlineSet and favCount == 0) then
+            table.insert(list, 2, { kind = "prof", key = "fav", name = "Favourites", count = favCount, icon = STAR })
+        end
+    end
     -- the chosen profession disappeared from the list: back to all of them
     if state.profession then
         local still = false
@@ -188,7 +199,11 @@ local function BuildRecipeItems()
         seen[id] = true
         items[#items + 1] = { kind = "recipe", id = id, name = name, lname = lname, key = key }
     end
-    if state.profession then
+    if state.profession == "fav" then
+        for key, e in pairs(rec) do
+            for _, id in ipairs(e.ids) do if ns.IsFavourite(id) then Consider(key, id) end end
+        end
+    elseif state.profession then
         local e = rec[state.profession]
         if e then for _, id in ipairs(e.ids) do Consider(state.profession, id) end end
     else
@@ -210,6 +225,13 @@ local function Select(id, qty)
 end
 
 local function RenderRecipeRow(row, item)
+    if not row.star then
+        row.star = row:CreateTexture(nil, "OVERLAY")
+        row.star:SetSize(14, 14)
+        row.star:SetPoint("RIGHT", row, "RIGHT", -8, 0)
+        row.star:SetTexture(STAR)
+    end
+    row.star:Hide()
     if item.kind == "note" then
         row:EnableMouse(false)
         MarkSelected(row, false)
@@ -223,28 +245,63 @@ local function RenderRecipeRow(row, item)
     local info = ns.RecipeInfo(item.id)
     local fallback = item.key and ns.PROFESSION_ICONS[tonumber(item.key)] or nil
     row.text:SetText(("|T%s:22|t  %s"):format(tostring(RecipeIcon(item.id, info, fallback)), ColoredRecipeName(item.id, item.name)))
+    -- a favourite: a yellow star at the end of the line
+    -- (not on the Favourites list itself: everything there is a favourite)
+    if ns.IsFavourite(item.id) and state.profession ~= "fav" then
+        row.text:ClearAllPoints()
+        row.text:SetPoint("LEFT", row, "LEFT", 6, 0)
+        row.text:SetPoint("RIGHT", row, "RIGHT", -26, 0)
+        row.star:Show()
+    end
     row.onClick = function()
         if Shifted() then LinkRecipe(item.id, item.name) else Select(item.id) end
     end
-    row.onEnter = function(r)
-        ShowRecipeHover(r, item.id, item.name, { K.Key("Click") .. ": show the details", K.Key("Shift-click") .. ": link in chat" })
+    -- (no tooltip on this list: the item's own tooltip is on its picture in the details)
+    row.onRightClick = function()
+        local isFav = ns.IsFavourite(item.id)
+        K.OpenMenu(ColoredRecipeName(item.id, item.name), {
+            { text = isFav and "Remove from favourites" or "Add to favourites",
+              action = function()
+                  ns.SetFavourite(item.id, not isFav)
+                  RefreshAll(true)
+              end },
+        })
     end
 end
-local itemList = CreateScrollList(itemBox, COL_B_W - 8 - 28, 564 - 16, 28, RenderRecipeRow, { stripes = true })
+local itemList = CreateScrollList(itemBox, COL_B_W - 12, 564 - 16, 28, RenderRecipeRow, { stripes = true, fitTrack = true })
 itemList.frame:SetPoint("TOPLEFT", itemBox, "TOPLEFT", 6, -8)
 
 ---------------------------------------------------------------------------
--- right, top: details of the selected item
+-- right, top: details of the selected item, laid out like the game's own profession window:
+-- the picture (its tooltip on hover), the name, the reagents with what I have, then who can craft it and the request controls
 ---------------------------------------------------------------------------
-local detailBox = NewBox(COL_C_X, -2, COL_C_W, 376)
+local DETAIL_H = 420
+local detailBox = NewBox(COL_C_X, -2, COL_C_W, DETAIL_H)
+-- nothing selected: an empty panel with a short text, no controls
+local emptyText = detailBox:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+emptyText:SetPoint("CENTER", detailBox, "CENTER", 0, 0)
+emptyText:SetText("No item selected")
+emptyText:SetTextColor(0.5, 0.5, 0.5)
 
-local detailIcon = detailBox:CreateTexture(nil, "ARTWORK")
-detailIcon:SetSize(40, 40)
-detailIcon:SetPoint("TOPLEFT", detailBox, "TOPLEFT", 10, -10)
--- Shift-click on the picture links the item in the chat (a recipe link for a craft that makes no item)
-local detailHit = CreateFrame("Button", nil, detailBox)
-detailHit:SetSize(40, 40)
-detailHit:SetPoint("TOPLEFT", detailBox, "TOPLEFT", 10, -10)
+-- everything else lives in this frame, shown only when an item is selected
+local view = CreateFrame("Frame", nil, detailBox)
+view:SetAllPoints(detailBox)
+
+local ICON = 46
+local iconFrame = CreateFrame("Frame", nil, view, "BackdropTemplate")
+iconFrame:SetSize(ICON + 4, ICON + 4)
+iconFrame:SetPoint("TOPLEFT", view, "TOPLEFT", 12, -12)
+iconFrame:SetBackdrop({ edgeFile = FLAT, edgeSize = 2 })
+iconFrame:SetBackdropBorderColor(0.45, 0.45, 0.45, 1)
+local detailIcon = iconFrame:CreateTexture(nil, "ARTWORK")
+detailIcon:SetSize(ICON, ICON)
+detailIcon:SetPoint("TOPLEFT", iconFrame, "TOPLEFT", 2, -2)
+
+-- the tooltip of the item (stats, use, the reagents) is on the picture; Shift-click links it in the chat
+-- (a recipe link for a craft that makes no item)
+local detailHit = CreateFrame("Button", nil, view)
+detailHit:SetSize(ICON + 4, ICON + 4)
+detailHit:SetPoint("TOPLEFT", view, "TOPLEFT", 12, -12)
 detailHit:SetScript("OnClick", function()
     local id = state.selected
     if not id or not Shifted() then return end
@@ -259,36 +316,68 @@ detailHit:SetScript("OnClick", function()
     end
 end)
 detailHit:SetScript("OnEnter", function(self)
-    if not state.selected then return end
+    local id = state.selected
+    if not id then return end
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    GameTooltip:SetText("Shift-click: link it in the chat", 1, 1, 1)
+    K.FillRecipeTooltip(GameTooltip, id, ns.RecipeName(id))
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddLine(K.Key("Shift-click") .. ": link in chat", 0.6, 0.6, 0.6)
     GameTooltip:Show()
 end)
 detailHit:SetScript("OnLeave", function() GameTooltip:Hide() end)
-local detailName = detailBox:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
-detailName:SetPoint("TOPLEFT", detailBox, "TOPLEFT", 58, -12)
-detailName:SetWidth(250)
+
+local detailName = view:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+detailName:SetPoint("TOPLEFT", view, "TOPLEFT", 70, -16)
+detailName:SetWidth(212)
 detailName:SetJustifyH("LEFT")
 detailName:SetWordWrap(false)
-local detailProf = detailBox:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-detailProf:SetPoint("TOPLEFT", detailBox, "TOPLEFT", 58, -34)
-detailProf:SetWidth(250)
+local detailProf = view:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+detailProf:SetPoint("TOPLEFT", view, "TOPLEFT", 70, -40)
+detailProf:SetWidth(230)
 detailProf:SetJustifyH("LEFT")
-local tipText = detailBox:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-tipText:SetPoint("TOPLEFT", detailBox, "TOPLEFT", 10, -62)
-tipText:SetWidth(298)
-tipText:SetJustifyH("LEFT")
-tipText:SetJustifyV("TOP")
-tipText:SetWordWrap(true)
-local TIP_HEIGHT = 96
+-- the star top right: filled for a favourite, an empty (gray, faint) one when not; a click switches it
+local starButton = CreateFrame("Button", nil, view)
+starButton:SetSize(24, 24)
+starButton:SetPoint("TOPRIGHT", view, "TOPRIGHT", -10, -12)
+local detailStar = starButton:CreateTexture(nil, "OVERLAY")
+detailStar:SetSize(20, 20)
+detailStar:SetPoint("CENTER", starButton, "CENTER", 0, 0)
+detailStar:SetTexture(STAR)
+local function ShowStar(fav)
+    detailStar:SetAlpha(fav and 1 or 0.35)
+    if detailStar.SetDesaturated then pcall(detailStar.SetDesaturated, detailStar, not fav) end
+end
+starButton:SetScript("OnClick", function()
+    local id = state.selected
+    if not id then return end
+    ns.SetFavourite(id, not ns.IsFavourite(id))
+    GameTooltip:Hide()
+    RefreshAll(true)
+end)
+starButton:SetScript("OnEnter", function(self)
+    local id = state.selected
+    if not id then return end
+    GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+    GameTooltip:SetText(ns.IsFavourite(id) and "Remove from favourites" or "Add to favourites", 1, 1, 1)
+    GameTooltip:Show()
+end)
+starButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
--- the item's tooltip text (Binds when equipped, stats, use...), read through a hidden tooltip
+local function Divider(y)
+    local t = view:CreateTexture(nil, "ARTWORK")
+    t:SetColorTexture(1, 0.82, 0, 0.22)
+    t:SetSize(COL_C_W - 24, 1)
+    t:SetPoint("TOPLEFT", view, "TOPLEFT", 12, y)
+    return t
+end
+Divider(-68)
+
+-- the game's own recipe tooltip names the reagents when we have no saved details (names only, no amounts)
 local scanTip
 pcall(function()
     scanTip = CreateFrame("GameTooltip", "FetaFondueScanTip", UIParent, "GameTooltipTemplate")
 end)
 
--- what the item is and does: its tooltip lines (Binds when equipped, stats, Use: ...), shown whole
 -- the "Reagents: A (2), B" line of the game's own spell tooltip, as a list of texts (names only)
 local function ReagentsFromLines(lines)
     local label = (type(_G.SPELL_REAGENTS) == "string" and _G.SPELL_REAGENTS ~= "") and _G.SPELL_REAGENTS or "Reagents: "
@@ -319,55 +408,45 @@ local function TooltipLines(id, info)
         for i = 2, math.min(n, 16) do
             local fs = _G["FetaFondueScanTipTextLeft" .. i]
             local text = fs and fs:GetText()
-            local lower = type(text) == "string" and text:lower() or ""
-            local isIDLine = lower:find("item%s*id") or lower:find("icon%s*id") or lower:find("spell%s*id")
-                or lower:find("file%s*id") or lower:find("itemid") or lower:find("iconid") or lower:find("spellid")
-            if type(text) == "string" and text ~= "" and not isIDLine then
-                local r, g, b = fs:GetTextColor()
-                if type(r) == "number" then
-                    text = ("|cff%02x%02x%02x%s|r"):format(math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5), text)
-                end
-                lines[#lines + 1] = text
-            end
+            if type(text) == "string" and text ~= "" then lines[#lines + 1] = text end
         end
     end)
     return lines
 end
 
--- show as many whole lines as fit into the box (never cut a line in the middle)
-local function ShowDescription(lines)
-    local n = #lines
-    tipText:SetText(table.concat(lines, "\n", 1, n))
-    while n > 1 and (tonumber(tipText:GetStringHeight()) or 0) > TIP_HEIGHT do
-        n = n - 1
-        tipText:SetText(table.concat(lines, "\n", 1, n))
-    end
-    if n == 0 then tipText:SetText("") end
-end
-
--- materials
-local reagentHeader = detailBox:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-reagentHeader:SetPoint("TOPLEFT", detailBox, "TOPLEFT", 10, -164)
-reagentHeader:SetWidth(298)
+-- reagents: the picture (tooltip of the reagent on hover) and "have/needed Name", green when I have enough, red when not
+local reagentHeader = view:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+reagentHeader:SetPoint("TOPLEFT", view, "TOPLEFT", 12, -78)
+reagentHeader:SetWidth(COL_C_W - 24)
 reagentHeader:SetJustifyH("LEFT")
 
+local REAGENT_ICON = 28
 local function RenderReagentRow(row, item)
+    if not row.icon then
+        row.icon = row:CreateTexture(nil, "ARTWORK")
+        row.icon:SetSize(REAGENT_ICON, REAGENT_ICON)
+        row.icon:SetPoint("LEFT", row, "LEFT", 2, 0)
+    end
     if item.kind == "note" then
+        row.icon:Hide()
         row:EnableMouse(false)
         row.text:SetFontObject("GameFontDisable")
         row.text:SetText(item.text)
         return
     end
     row:EnableMouse(true)
+    row.icon:Show()
     row.text:SetFontObject("GameFontHighlight")
-    local name, icon, quality = ItemData(item.id)
-    local hex = quality and QUALITY_HEX[quality]
+    row.text:ClearAllPoints()
+    row.text:SetPoint("LEFT", row, "LEFT", REAGENT_ICON + 10, 0)
+    row.text:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+    local name, icon = ItemData(item.id)
     local shown = name or ("item " .. item.id)
-    local colored = hex and ("|cff" .. hex .. shown .. "|r") or shown
     local have = 0
     pcall(function() have = GetItemCount(item.id, true) or 0 end)
-    local short = have < item.count and ("  |cffff4040(you have " .. have .. ")|r") or ""
-    row.text:SetText(("|T%s:16|t %s × %s%s"):format(tostring(icon or QUESTION), Gold(item.count), colored, short))
+    local color = have >= item.count and "|cff40ff40" or "|cffff4040"
+    row.icon:SetTexture(icon or QUESTION)
+    row.text:SetText(("%s%d/%d %s|r"):format(color, have, item.count, shown))
     row.onClick = function() LinkMaterial(item.id, shown, item.count) end
     row.onEnter = function(r)
         GameTooltip:SetOwner(r, "ANCHOR_LEFT")
@@ -378,13 +457,13 @@ local function RenderReagentRow(row, item)
         GameTooltip:Show()
     end
 end
-local reagentList = CreateScrollList(detailBox, 270, 90, 18, RenderReagentRow, { stripes = true })
-reagentList.frame:SetPoint("TOPLEFT", detailBox, "TOPLEFT", 10, -182)
+local reagentList = CreateScrollList(view, 276, 160, 32, RenderReagentRow)
+reagentList.frame:SetPoint("TOPLEFT", view, "TOPLEFT", 12, -98)
 
--- who can craft it
-local playersHeader = detailBox:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-playersHeader:SetPoint("TOPLEFT", detailBox, "TOPLEFT", 10, -278)
-playersHeader:SetWidth(298)
+-- who can craft it (online ones first)
+local playersHeader = view:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+playersHeader:SetPoint("TOPLEFT", view, "TOPLEFT", 12, -266)
+playersHeader:SetWidth(COL_C_W - 24)
 playersHeader:SetJustifyH("LEFT")
 
 local function RenderPlayerRow(row, item)
@@ -408,30 +487,31 @@ local function RenderPlayerRow(row, item)
         GameTooltip:Show()
     end
 end
-local playersList = CreateScrollList(detailBox, 270, 36, 18, RenderPlayerRow, { stripes = true })
-playersList.frame:SetPoint("TOPLEFT", detailBox, "TOPLEFT", 10, -294)
+local playersList = CreateScrollList(view, 276, 72, 18, RenderPlayerRow, { stripes = true })
+playersList.frame:SetPoint("TOPLEFT", view, "TOPLEFT", 12, -284)
 
 -- quantity and Request
-local minusButton = K.NewButton(detailBox)
+local CONTROLS_Y = -376
+local minusButton = K.NewButton(view)
 minusButton:SetSize(24, 24)
-minusButton:SetPoint("TOPLEFT", detailBox, "TOPLEFT", 10, -342)
+minusButton:SetPoint("TOPLEFT", view, "TOPLEFT", 12, CONTROLS_Y)
 minusButton:SetText("-")
-local qtyBox = K.NewEditBox("FetaFondueQuantity", detailBox)
+local qtyBox = K.NewEditBox("FetaFondueQuantity", view)
 qtyBox:SetSize(44, 20)
 qtyBox:SetPoint("LEFT", minusButton, "RIGHT", 8, 0)
 qtyBox:SetAutoFocus(false)
 qtyBox:SetNumeric(true)
 qtyBox:SetMaxLetters(3)
 qtyBox:SetJustifyH("CENTER")
-local plusButton = K.NewButton(detailBox)
+local plusButton = K.NewButton(view)
 plusButton:SetSize(24, 24)
 plusButton:SetPoint("LEFT", qtyBox, "RIGHT", 8, 0)
 plusButton:SetText("+")
-local requestButton = K.NewButton(detailBox)
+local requestButton = K.NewButton(view)
 requestButton:SetSize(96, 24)
 requestButton:SetPoint("LEFT", plusButton, "RIGHT", 12, 0)
 requestButton:SetText("Request")
-local confirmText = detailBox:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+local confirmText = view:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
 confirmText:SetPoint("LEFT", requestButton, "RIGHT", 8, 0)
 confirmText:SetWidth(70)
 confirmText:SetJustifyH("LEFT")
@@ -461,23 +541,23 @@ requestButton:SetScript("OnClick", function()
     confirmText:SetText("|cff40ff40Requested|r")
 end)
 
+local function QualityColor(q)
+    local hex = q and QUALITY_HEX[q]
+    if not hex then return 0.45, 0.45, 0.45 end
+    return tonumber(hex:sub(1, 2), 16) / 255, tonumber(hex:sub(3, 4), 16) / 255, tonumber(hex:sub(5, 6), 16) / 255
+end
+
 local function RefreshDetails()
     local id = state.selected
     confirmText:SetText("")
-    qtyBox:SetText(tostring(state.qty))
     if not id then
-        detailIcon:SetTexture(QUESTION)
-        detailName:SetText(Gray("Pick an item"))
-        detailProf:SetText("")
-        tipText:SetText("")
-        reagentHeader:SetText("")
-        reagentList:Render({ { kind = "note", text = "Select an item on the left." } })
-        playersHeader:SetText("")
-        playersList:Render({ { kind = "note", text = "" } })
-        requestButton:Disable()
+        view:Hide()
+        emptyText:Show()
         return
     end
-    requestButton:Enable()
+    view:Show()
+    emptyText:Hide()
+    qtyBox:SetText(tostring(state.qty))
 
     local name = ns.RecipeName(id)
     local info = ns.RecipeInfo(id)
@@ -486,7 +566,9 @@ local function RefreshDetails()
     if not info and ns.Sync then ns.Sync.RequestRecipeInfo(id) end
 
     detailIcon:SetTexture(RecipeIcon(id, info, QUESTION))
+    iconFrame:SetBackdropBorderColor(QualityColor(info and info.item and select(3, ItemData(info.item))))
     detailName:SetText(ColoredRecipeName(id, name))
+    ShowStar(ns.IsFavourite(id))
 
     local req = ns.Professions.RecipeRequirements({ id })[id]
     if req and req.name then
@@ -496,25 +578,26 @@ local function RefreshDetails()
         detailProf:SetText("")
     end
 
-    local tipLines = TooltipLines(id, info)
-    ShowDescription(tipLines)
-
-    -- materials for the quantity
+    -- reagents for the quantity
     if info and #info.reagents > 0 then
         local list, crafts, made = ns.TotalMaterials(info, state.qty)
-        reagentHeader:SetText(TotalsHeader(state.qty, crafts, made))
+        if state.qty == 1 and made == 1 then
+            reagentHeader:SetText("Reagents:")
+        else
+            reagentHeader:SetText((TotalsHeader(state.qty, crafts, made):gsub("^Materials", "Reagents")))
+        end
         reagentList:Render(list, true)
     else
         -- no saved details: the game's own tooltip may still name the reagents (names only, no amounts per quantity)
-        local named = (not info) and ReagentsFromLines(tipLines) or nil
+        local named = (not info) and ReagentsFromLines(TooltipLines(id, info)) or nil
         if named then
-            reagentHeader:SetText("Materials (from the game's tooltip)")
+            reagentHeader:SetText("Reagents (from the game's tooltip)")
             local rows = {}
             for _, t in ipairs(named) do rows[#rows + 1] = { kind = "note", text = t } end
             reagentList:Render(rows)
         else
-            reagentHeader:SetText("Materials")
-            reagentList:Render({ { kind = "note", text = info and "No materials needed." or "Materials not known yet (asking guildmates)" } })
+            reagentHeader:SetText("Reagents:")
+            reagentList:Render({ { kind = "note", text = info and "No reagents needed." or "Reagents not known yet (asking guildmates)" } })
         end
     end
 
@@ -535,10 +618,10 @@ end
 ---------------------------------------------------------------------------
 -- right, bottom: all requests
 ---------------------------------------------------------------------------
-local requestsHeader = panel:Text("GameFontNormal", COL_C_X, -384, COL_C_W - 110)
-local requestBox = NewBox(COL_C_X, -402, COL_C_W, 184)
+local requestsHeader = panel:Text("GameFontNormal", COL_C_X, -428, COL_C_W - 110)
+local requestBox = NewBox(COL_C_X, -446, COL_C_W, 140)
 
-local requestList = CreateScrollList(requestBox, COL_C_W - 8 - 28, 184 - 16, 22,
+local requestList = CreateScrollList(requestBox, COL_C_W - 8 - 28, 140 - 16, 22,
     K.RequestRowRenderer({ withDelete = true, onOpen = function(r) ns.UI.OpenSweatshopRecipe(r.id, r.qty) end }), { stripes = true })
 requestList.frame:SetPoint("TOPLEFT", requestBox, "TOPLEFT", 6, -8)
 

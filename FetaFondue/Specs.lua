@@ -85,6 +85,21 @@ function S.Holders(specID)
     return out
 end
 
+-- A profession was unlearned: the specializations and the cooldowns that belong to it go too. m = the data of one character
+-- (his own, or what we hold of a guildie); key = the profession key as a string.
+function S.DropProfession(m, key)
+    if not m then return end
+    key = tostring(key)
+    local spells = S.CooldownSpells()
+    for id in pairs(m.cds or {}) do
+        if tostring(spells[id] or "") == key then m.cds[id] = nil end
+    end
+    for id in pairs(m.specs or {}) do
+        local e = specInfo[id]
+        if e and e.key == key then m.specs[id] = nil end
+    end
+end
+
 local function Known(id)
     local ok, v = pcall(function()
         if IsPlayerSpell then return IsPlayerSpell(id) end
@@ -139,6 +154,26 @@ S.SEED = {
     [25146] = { "171", "Transmute: Elemental Fire" },
     [19566] = { "165", "Salt Shaker", item = true },
 }
+-- The Cooldowns tab splits Alchemy into groups by what is transmuted. The group of a spell id (the seed ones); a transmute the seed does not
+-- know is sorted by its name ("Transmute: X to Y" goes to Y), anything else is "Other".
+S.TRANSMUTE_GROUP = {
+    [17187] = "Arcanite", [25146] = "Elemental Fire", [1317279] = "Legionite", [11479] = "Gold", [11480] = "Truesilver",
+    [17559] = "Essences", [17560] = "Essences", [17561] = "Essences", [17562] = "Essences",
+    [17563] = "Essences", [17564] = "Essences", [17565] = "Essences", [17566] = "Essences",
+}
+-- the spell whose icon stands for a group
+S.TRANSMUTE_ICON = { Arcanite = 17187, ["Elemental Fire"] = 25146, Legionite = 1317279, Gold = 11479, Truesilver = 11480 }
+-- a group that shows an item instead (Essences: the Essence of Fire, 7078)
+S.TRANSMUTE_ITEM_ICON = { Essences = 7078 }
+function S.TransmuteGroup(id, name)
+    if S.TRANSMUTE_GROUP[id] then return S.TRANSMUTE_GROUP[id] end
+    if type(name) == "string" then
+        local target = name:match("^Transmute: .+ to (.+)$") or name:match("^Transmute: (.+)$")
+        if target and target ~= "" then return target end
+    end
+    return "Other"
+end
+
 -- Salt Shaker is an item's use spell, not a recipe: a leatherworker has it only when its cooldown is (or was) running, because a ready one
 -- cannot be told from "no shaker". Cooldowns that share a timer are NOT linked (not confirmed yet).
 local MIN_DISCOVER = 600       -- a recipe on a cooldown longer than this (seconds) is a profession cooldown
@@ -156,6 +191,28 @@ local function Cooldown(id)
     return tonumber(start) or 0, tonumber(duration) or 0
 end
 
+-- The game's clock is a 32-bit counter of milliseconds. For a cooldown that began before the computer was (re)started, GetSpellCooldown can give a start
+-- time near 4,294,967 seconds (49.7 days) instead of a small or negative one, and "start + duration - now" then comes out around 50 days (seen in
+-- 1.0.18: Transmute: Arcanite at 50d 18h). The wrapped start is put back; a result that cannot be right (more than the whole duration left) is
+-- not trusted at all (nil).
+local CLOCK_WRAP = 4294967.296
+function S.LeftFrom(start, duration, now)
+    start, duration, now = tonumber(start) or 0, tonumber(duration) or 0, tonumber(now) or 0
+    if start <= 0 or duration <= 2 then return 0 end
+    if start > now + 1 then start = start - CLOCK_WRAP end
+    local left = start + duration - now
+    if left > duration + 5 then return nil end
+    if left < 2 then return 0 end
+    return left
+end
+
+-- no profession cooldown is longer than this: an end time further away than that is a wrong value (nobody has to wait two weeks)
+S.MAX_COOLDOWN = 14 * 86400
+function S.Plausible(endTime)
+    if not endTime or endTime <= 0 then return true end
+    return endTime - ns.Time() <= S.MAX_COOLDOWN
+end
+
 -- the cooldown spells everybody knows about: seed + discovered + received
 function S.CooldownSpells()
     local out = {}
@@ -163,6 +220,30 @@ function S.CooldownSpells()
     local db = ns.DB
     for id, key in pairs(db and db.cdSpells or {}) do out[id] = key end
     return out
+end
+
+-- My professions changed (one was unlearned): drop my cooldowns of professions I no longer have and read my specializations again
+-- (those of a profession I no longer have are not read). Others learn about it from the list of professions in my advert.
+function S.OnProfessionsChanged()
+    local own = ns.GetOwn()
+    if not own then return end
+    local spells = S.CooldownSpells()
+    local dropped = false
+    for id in pairs(own.cds or {}) do
+        local key = spells[id]
+        if key and tostring(key) ~= "0" and not (own.profs or {})[tostring(key)] then
+            own.cds[id] = nil
+            dropped = true
+        end
+    end
+    if dropped then own.cdsRev = ns.Time() end
+    -- specializations of a profession I no longer have go at once (ReadOwn below only runs when the world is ready)
+    for id in pairs(own.specs or {}) do
+        local e = specInfo[id]
+        if e and not (own.profs or {})[e.key] then own.specs[id] = nil own.specsRev = ns.Time() end
+    end
+    S.ReadOwn()
+    if dropped and ns.RefreshUI then ns.RefreshUI() end
 end
 
 function S.CooldownName(id)
@@ -194,6 +275,7 @@ end
 -- read the cooldowns of my own character. Known recipes that are on a long cooldown are added to the list.
 -- skipDiscovery: only read the cooldowns that are known (the cheap part). The discovery of new cooldown recipes asks the game about every recipe
 -- I know, so it runs at login, after a craft of a recipe and when a profession window opens, not on every refresh.
+local castAt = {}        -- spell id -> our own time() when I crafted it (this session)
 function S.ScanOwn(skipDiscovery)
     local own = ns.GetOwn()
     if not own or not ns.worldReady or not ns.DB then return end
@@ -224,16 +306,27 @@ function S.ScanOwn(skipDiscovery)
         end
         if eligible then
             local start, duration = Cooldown(id)
-            local left = 0
-            if start > 0 and duration > 2 then
-                left = start + duration - GetTime()
-                if left < 2 then left = 0 end
+            local left = S.LeftFrom(start, duration, GetTime())
+            -- the length of this cooldown, as the game reports it (the length is reliable even when the start time is not): kept for later
+            if start > 0 and duration >= MIN_DISCOVER and duration <= S.MAX_COOLDOWN then
+                db.cdDur = db.cdDur or {}
+                db.cdDur[id] = math.floor(duration)
             end
-            local endTime = left > 0 and (ns.Time() + math.floor(left)) or 0
-            local old = own.cds[id]
-            if old == nil or math.abs((old or 0) - endTime) > 60 or (old > 0) ~= (endTime > 0) then
-                own.cds[id] = endTime
-                changed = true
+            -- just crafted (a few seconds ago) and the game does not show the cooldown yet or gives nothing usable: our own timestamp stands
+            local stamp = castAt[id]
+            if stamp and ns.Time() - stamp < 90 and (left == nil or left == 0) and db.cdDur and db.cdDur[id] then
+                left = stamp + db.cdDur[id] - ns.Time()
+            end
+            if left == nil then
+                -- the game gave a time that cannot be right: keep what we knew (a wrong stored value is dropped)
+                if own.cds[id] ~= nil and not S.Plausible(own.cds[id]) then own.cds[id] = nil changed = true end
+            else
+                local endTime = left > 0 and (ns.Time() + math.floor(left)) or 0
+                local old = own.cds[id]
+                if old == nil or math.abs((old or 0) - endTime) > 60 or (old > 0) ~= (endTime > 0) then
+                    own.cds[id] = endTime
+                    changed = true
+                end
             end
         end
     end
@@ -275,7 +368,59 @@ end
 function S.OnCast(spellID)
     local own = ns.GetOwn()
     if not own or not ns.worldReady then return end
-    if Recipes(own)[spellID] then S.ScheduleScan(1.5, true) end
+    if Recipes(own)[spellID] then
+        S.NoteCast(own, spellID)
+        S.ScheduleScan(1.5, true)
+    end
+end
+
+-- I crafted a recipe that has a cooldown: the end time is the moment of the craft plus the length of the cooldown (learned from an earlier read),
+-- without waiting for the game. The scan that follows corrects it with the game's own value when that one is usable.
+function S.NoteCast(own, spellID)
+    local db = ns.DB
+    if not (db and S.CooldownSpells()[spellID]) then return end
+    local now = ns.Time()
+    castAt[spellID] = now
+    local dur = db.cdDur and db.cdDur[spellID]
+    if not dur then return end
+    own.cds = own.cds or {}
+    own.cds[spellID] = now + dur
+    own.cdsRev = now
+    if ns.Sync and ns.Sync.AdvertiseCooldowns then ns.Sync.AdvertiseCooldowns() end
+    if ns.RefreshUI then ns.RefreshUI() end
+end
+
+-- /ff cds: what the game says and what we hold, to see where a cooldown goes wrong
+function S.DebugDump()
+    local own = ns.GetOwn()
+    local db = ns.DB
+    if not (own and db) then return end
+    ns.Print(("Cooldowns: game time %.0f, clock %d"):format(GetTime(), ns.Time()))
+    local ids = {}
+    for id in pairs(S.CooldownSpells()) do ids[#ids + 1] = id end
+    table.sort(ids)
+    for _, id in ipairs(ids) do
+        local start, duration = Cooldown(id)
+        local stored = own.cds and own.cds[id]
+        if start > 0 or stored ~= nil then
+            local left = S.LeftFrom(start, duration, GetTime())
+            ns.Print(("%s (%d): start %.0f, length %.0f, game left %s, mine %s, length kept %s"):format(S.CooldownName(id), id, start, duration,
+                left == nil and "unusable" or ("%.0fs"):format(left), stored == nil and "-" or ("%.0fs"):format(S.Remaining(stored)),
+                tostring(db.cdDur and db.cdDur[id])))
+        end
+    end
+    local n = 0
+    for guid, m in pairs(ns.GetMembers() or {}) do
+        if not ns.IsMine(guid) then
+            for id, endTime in pairs(m.cds or {}) do
+                n = n + 1
+                if n <= 15 then
+                    ns.Print(("  %s: %s %s%s"):format(m.name or guid, S.CooldownName(id), S.TimeText(S.Remaining(endTime)), S.Plausible(endTime) and "" or " (impossible, hidden)"))
+                end
+            end
+        end
+    end
+    if n > 15 then ns.Print(("  ... and %d more"):format(n - 15)) end
 end
 
 -- a profession window opened (or its list changed): look for new cooldown recipes, at most every five minutes
@@ -294,6 +439,7 @@ function S.ListByProfession()
     local spells = S.CooldownSpells()
     for guid, m in pairs(ns.GetMembers() or {}) do
         for id, endTime in pairs(m.cds or {}) do
+          if S.Plausible(endTime) then
             local key = spells[id] or "?"
             local g = byKey[key]
             if not g then
@@ -302,6 +448,7 @@ function S.ListByProfession()
                 groups[#groups + 1] = g
             end
             g.rows[#g.rows + 1] = { guid = guid, member = m, spell = id, left = S.Remaining(endTime) }
+          end
         end
     end
     for _, g in ipairs(groups) do

@@ -10,7 +10,6 @@ local R = ns.Raids
 -- The match is shared with everybody. A name that is the name of exactly one guild character is matched by itself.
 ---------------------------------------------------------------------------
 local win = NewWindow("FetaFondueDiscordNames", 660, 530)
-win:SetFrameStrata("FULLSCREEN_DIALOG")
 win:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
 win:SetMovable(true)
 win:RegisterForDrag("LeftButton")

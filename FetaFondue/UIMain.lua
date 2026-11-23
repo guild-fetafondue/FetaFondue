@@ -97,14 +97,42 @@ for i, def in ipairs(tabs) do
 end
 
 local version = main:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
-version:SetPoint("BOTTOM", main, "BOTTOMLEFT", 98, 28)
+version:SetPoint("BOTTOM", main, "BOTTOMLEFT", 90, 8)
 local meta = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
 local okV, ver = pcall(function() return meta and meta("FetaFondue", "Version") end)
 version:SetText(okV and ver and ("v" .. ver) or "")
 
+-- the two buttons above the version (bottom of the left column): the guild invite (only for those who may invite) and the Discord invite
+local function SideButton(label, y)
+    local b = K.NewButton(main, label)
+    b:SetSize(TAB_W, 24)
+    b:SetPoint("BOTTOM", main, "BOTTOMLEFT", 90, y)       -- (90 = the middle of the tabs above: they start at 12 and are 156 wide)
+    return b
+end
+local discordButton = SideButton("Advertise Discord", 26)
+local inviteButton = SideButton("Invite to guild", 62)         -- (12 between the two buttons: three times the 4 it was)
+K.discordButton, K.inviteButton = discordButton, inviteButton
+inviteButton:SetScript("OnClick", function() if ns.UI.OpenGuildInvite then ns.UI.OpenGuildInvite() end end)
+-- "Advertise Discord": the invite is put into the chat box and whoever pressed the button presses Enter to send it (an addon cannot
+-- send a chat message by itself)
+discordButton:SetScript("OnClick", function() K.OpenChatWith("FetaFondue Discord Server: " .. ns.DISCORD_INVITE) end)
+local paintEnter, paintLeave = discordButton:GetScript("OnEnter"), discordButton:GetScript("OnLeave")      -- (the button's own hover colour stays)
+discordButton:SetScript("OnEnter", function(self)
+    if paintEnter then paintEnter(self) end
+    GameTooltip:SetOwner(self, "ANCHOR_TOP")
+    GameTooltip:SetText("Advertise Discord", 1, 1, 1)
+    GameTooltip:AddLine("Puts the invite to our Discord server into your chat box. Choose the channel you want, then press Enter to send it.", 0.8, 0.8, 0.8, true)
+    GameTooltip:Show()
+end)
+discordButton:SetScript("OnLeave", function(self)
+    if paintLeave then paintLeave(self) end
+    GameTooltip:Hide()
+end)
+
 -- show only the tabs this person may use, one under the other
 local function UpdateTabs()
     local row = 0
+    inviteButton:SetShown(ns.CanInviteToGuild())
     for _, def in ipairs(tabs) do
         local visible = (not def.visible) or def.visible()
         def.shown = visible and true or false
@@ -178,6 +206,7 @@ function ns.RefreshUI()
         if ns.UI.RefreshAnalytics then ns.UI.RefreshAnalytics() end
         if ns.UI.RefreshAdmin then ns.UI.RefreshAdmin() end
         if ns.UI.RefreshAchievements then ns.UI.RefreshAchievements() end
+        if ns.UI.RefreshComposition then ns.UI.RefreshComposition() end
     end
     if ns.UI.RefreshWelcome then ns.UI.RefreshWelcome() end
     ns.UI.RefreshProfessionView(true)

@@ -27,6 +27,7 @@ local DEFAULTS = {
     extraRaidFinal = {},   -- [raid key] = { names = {...}, ids = {...} }: last bosses added with /ff addraidboss
     toasts = true,         -- small messages that close by themselves (achievements)
     raidReminded = {},     -- [raid id:start] = when its 15-minutes reminder was shown
+    favourites = {},       -- [recipeID] = true: my favourite items in the Sweatshop (only on this installation, never shared)
     showOffline = false,   -- the dashboard list also shows guildies who are offline
     finalBossIDs = {},     -- encounter ids of final bosses (learned from clients that know the names)
     itemCache = {},        -- [itemID] = { n = name, i = icon, q = quality }: so item icons show at once
@@ -483,7 +484,7 @@ function ns.LastSeenText(entry)
     if not secs then return "Offline" end
     local h = math.floor(secs / 3600)
     local function Plural(n, w) return ("%d %s%s ago"):format(n, w, n == 1 and "" or "s") end
-    if h < 1 then return "Last seen less than an hour ago" end
+    if h < 1 then return "Last seen < 1 hour ago" end
     if h < 24 then return "Last seen " .. Plural(h, "hour") end
     local d = math.floor(h / 24)
     if d < 30 then return "Last seen " .. Plural(d, "day") end
@@ -506,7 +507,6 @@ function ns.TrackJoins()
     local now = ns.Time()
     local first = not gd.joinedBase
     gd.joinedBase = gd.joinedBase or now
-    local dflt = ns.JOIN_DEFAULT and ns.CivilToTime(ns.JOIN_DEFAULT[1], ns.JOIN_DEFAULT[2], ns.JOIN_DEFAULT[3]) or now
     local changed = {}
     if ns.worldReady and not ns.joinBaseline then
         ns.joinBaseline = {}
@@ -515,10 +515,15 @@ function ns.TrackJoins()
     for _, e in ipairs(roster.list) do
         if e.guid then
             local have = gd.joined and gd.joined[e.guid]
-            if not have then
-                local ts, exact = now, true
-                if first then ts, exact = dflt, false end
-                if ns.NoteJoined(e.guid, ts, exact, ns.JoinWasLive(e.guid)) then changed[#changed + 1] = e.guid end
+            if not have and not (gd.joinedUnknown and gd.joinedUnknown[e.guid]) then
+                if first then
+                    -- already there when the addon first looked: nobody knows when they joined, so no date is made up
+                    -- (an exact date from another addon user can still arrive and is then kept)
+                    gd.joinedUnknown = gd.joinedUnknown or {}
+                    gd.joinedUnknown[e.guid] = true
+                elseif ns.NoteJoined(e.guid, now, true, ns.JoinWasLive(e.guid)) then
+                    changed[#changed + 1] = e.guid
+                end
             end
         end
     end
@@ -587,12 +592,11 @@ function ns.GetAltLinks()
     return gd.altLinks
 end
 
--- who may guild-invite: what the game says (CanGuildInvite), or rank 4 and higher (rank index 0-3: guild master ... Big Feta)
+-- who may guild-invite: rank 4 and higher only (rank index 0-3: guild master ... Big Feta). The game's own answer (CanGuildInvite)
+-- is not used any more: it said yes for ranks that cannot actually invite.
 ns.INVITE_MAX_RANK_INDEX = 3
 function ns.CanInviteToGuild()
     local ok = false
-    pcall(function() if CanGuildInvite and CanGuildInvite() then ok = true end end)
-    if ok then return true end
     pcall(function()
         local e = ns.myGUID and ns.GetRoster().byGUID[ns.myGUID]
         if e and e.rankIndex ~= nil and e.rankIndex <= ns.INVITE_MAX_RANK_INDEX then ok = true end
@@ -692,7 +696,10 @@ function ns.ADDON_LOADED(name)
     DB = FetaFondueDB
     CopyDefaults(DEFAULTS, DB)
     -- a random id of this installation: the guild can tell how many people (not characters) run the addon
-    if not DB.clientID then DB.clientID = ("%08x%04x"):format(math.random(1, 2147483647), math.random(0, 65535)) end
+    if not DB.clientID then
+        DB.clientID = ("%08x%04x"):format(math.random(1, 2147483647), math.random(0, 65535))
+        DB.addonSince = ns.Time()      -- (a new installation: since when this client has had the addon; older installations have none = from the start)
+    end
     ns.DB = DB
     for _, info in ipairs(ns.blocked.pending) do StoreBlocked(info) end      -- blocked events that came before the saved data
     ns.blocked.pending = {}
@@ -749,6 +756,7 @@ function ns.PLAYER_ENTERING_WORLD()
     ns.Stats.UpdateRun()
     ns.After(10, function()
         ns.worldReady = true
+        if ns.Professions and ns.Professions.ScheduleKnownRefresh then ns.Professions.ScheduleKnownRefresh() end      -- (an empty list is only acted on from now on)
         if ns.RefreshUI then ns.RefreshUI() end
         if sessionStarted then return end
         sessionStarted = true
@@ -785,14 +793,19 @@ function ns.PurgeDeparted()
     if roster.total < 1 then return 0 end          -- roster not loaded: nobody is "gone" yet
 
     -- somebody who left and comes back is a new member: forget the old date (not when the roster looks half loaded)
-    if gd.joined then
+    if gd.joined or gd.joinedUnknown then
         local known, absent = 0, {}
-        for guid in pairs(gd.joined) do
-            known = known + 1
-            if not roster.byGUID[guid] and not ns.IsMine(guid) then absent[#absent + 1] = guid end
+        for _, set in ipairs({ gd.joined or {}, gd.joinedUnknown or {} }) do
+            for guid in pairs(set) do
+                known = known + 1
+                if not roster.byGUID[guid] and not ns.IsMine(guid) then absent[#absent + 1] = guid end
+            end
         end
         if #absent > 0 and roster.total >= known * 0.8 then
-            for _, guid in ipairs(absent) do gd.joined[guid] = nil end
+            for _, guid in ipairs(absent) do
+                if gd.joined then gd.joined[guid] = nil end
+                if gd.joinedUnknown then gd.joinedUnknown[guid] = nil end
+            end
         end
     end
 
@@ -888,6 +901,32 @@ ns.CRAFT_SHOW = Scan
 ns.CRAFT_UPDATE = Scan
 function ns.NEW_RECIPE_LEARNED(recipeID) ns.Professions.OnRecipeLearned(recipeID) end
 function ns.SKILL_LINES_CHANGED() ns.Professions.ScheduleKnownRefresh() end
+
+-- My talents changed (a respec, the other specialization made active, a point spent): look again a few seconds later, never inside the
+-- game's own talent event (Blizzard's talent window runs in it), not in combat, and tell the guild only when the setups really changed.
+-- (Events a client does not have are skipped by HookEvent.)
+local talentQueued = false
+local TalentsChanged
+TalentsChanged = function()
+    if talentQueued then return end
+    talentQueued = true
+    ns.After(6, function()
+        talentQueued = false
+        if not (ns.worldReady and ns.Inspect and ns.Inspect.RefreshOwn) then return end
+        local inCombat = false
+        pcall(function() inCombat = InCombatLockdown and InCombatLockdown() or false end)
+        if inCombat then ns.After(20, TalentsChanged) return end
+        if ns.Inspect.RefreshOwn() then
+            if ns.Sync and ns.Sync.AdvertiseOwnTalents then ns.Sync.AdvertiseOwnTalents() end
+            if ns.RefreshUI then ns.RefreshUI() end
+        end
+    end)
+end
+for _, talentEvent in ipairs({ "PLAYER_TALENT_UPDATE", "ACTIVE_TALENT_GROUP_CHANGED", "TRAIT_CONFIG_UPDATED", "ACTIVE_PLAYER_SPECIALIZATION_CHANGED" }) do
+    ns.HookEvent(talentEvent, function() TalentsChanged() end)
+end
+-- the group changed: the composition planner (Management > Planner) looks at it again
+ns.HookEvent("GROUP_ROSTER_UPDATE", function() if ns.Composition and ns.Composition.OnRoster then ns.Composition.OnRoster() end end)
 function ns.GET_ITEM_INFO_RECEIVED() if ns.UI and ns.UI.OnItemData then ns.UI.OnItemData() end end
 function ns.INSPECT_READY(guid) ns.Inspect.OnInspectReady(guid) end
 function ns.SPELL_DATA_LOAD_RESULT() if ns.UI and ns.UI.OnItemData then ns.UI.OnItemData() end end
@@ -1086,8 +1125,12 @@ SlashCmdList["FETAFONDUE"] = function(input)
     elseif cmd == "debug" then
         DB.debug = not DB.debug
         ns.Print("Debug output: " .. (DB.debug and "ON" or "OFF"))
+    elseif cmd == "cds" then
+        ns.Specs.DebugDump()
     elseif cmd == "probe" then
         Probe()
+    elseif cmd == "statprobe" then
+        ns.StatProbe()
     elseif cmd == "talentprobe" then
         ns.TalentProbe((input or ""):match("^%s*%S+%s*(.-)%s*$"))
     elseif cmd == "demo" then
@@ -1117,6 +1160,6 @@ SlashCmdList["FETAFONDUE"] = function(input)
             ns.Print("Usage: /ff addboss <final boss name>")
         end
     else
-        ns.Print("Commands: /ff (open/close), /ff sweatshop, /ff welcome, /ff scan, /ff sync, /ff stats, /ff login, /ff whoami, /ff shitlist, /ff blocked, /ff achievements, /ff toast [on|off], /ff raids, /ff addraidboss <onyxia|hyjal|barrow> <boss name or id>, /ff addraidid <onyxia|hyjal|barrow> <instance id>, /ff raidcrit <raid> <ignore|use> <step number>, /ff invitelog, /ff taint [off], /ff debug, /ff probe, /ff talentprobe [view [specID]], /ff demo, /ff addzone <dungeon|raid|capital> <zone>, /ff addboss <name>")
+        ns.Print("Commands: /ff (open/close), /ff sweatshop, /ff welcome, /ff scan, /ff sync, /ff stats, /ff login, /ff whoami, /ff shitlist, /ff blocked, /ff achievements, /ff toast [on|off], /ff raids, /ff addraidboss <onyxia|hyjal|barrow> <boss name or id>, /ff addraidid <onyxia|hyjal|barrow> <instance id>, /ff raidcrit <raid> <ignore|use> <step number>, /ff invitelog, /ff taint [off], /ff debug, /ff cds, /ff statprobe, /ff probe, /ff talentprobe [view [specID]], /ff demo, /ff addzone <dungeon|raid|capital> <zone>, /ff addboss <name>")
     end
 end

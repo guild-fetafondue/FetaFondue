@@ -116,6 +116,60 @@ function A.Holders(key)
     return out
 end
 
+-- Somebody who joined the guild AFTER the day he earned something did not earn it for the guild. Only a join date that is known exactly counts
+-- (the 5 November default is a guess: there the character stays eligible), and the comparison is by day.
+function A.Eligible(guid, ts)
+    local j = ns.GetJoined and ns.GetJoined(guid)
+    if not (j and j.exact and tonumber(j.ts) and tonumber(ts)) then return true end
+    return math.floor(j.ts / 86400) <= math.floor(ts / 86400)
+end
+
+-- From 1.0.22: an achievement that was claimed more than 12 hours ago and that most addon users have by now is not given later to somebody
+-- who did not have the addon in those first 12 hours (a roster scan of a guildie without the addon, or an addon installed later that
+-- finds the character already past the mark). What is seen happening (the time is known) always counts. "Most addon users have it": more than
+-- half of the addon users (one per installation) have been heard from since the first claim, so the claim has reached them.
+A.LATE_HOURS = 12
+function A.MostHaveIt(firstTs)
+    local users, got, seen = 0, 0, {}
+    local function Count(client, synced)
+        if seen[client] then return end
+        seen[client] = true
+        users = users + 1
+        if synced then got = got + 1 end
+    end
+    Count((ns.DB and ns.DB.clientID) or "me", true)            -- (me: this client has the data)
+    for guid, m in pairs(ns.GetMembers() or {}) do
+        if not ns.IsMine(guid) and (m.seen or m.diag) then
+            Count(m.client or ("c:" .. tostring(guid)), (m.seen or 0) >= firstTs)
+        end
+    end
+    return got * 2 > users
+end
+
+-- did this character have the addon within 12 hours of the first claim? (members and installs from before 1.0.22 count as having had it)
+local function HadAddon(guid, firstTs)
+    local since
+    if ns.IsMine(guid) then
+        since = ns.DB and ns.DB.addonSince or 0
+    else
+        local m = (ns.GetMembers() or {})[guid]
+        if not (m and (m.seen or m.diag)) then return false end
+        since = m.addonSince or 0
+    end
+    return since <= firstTs + A.LATE_HOURS * 3600
+end
+
+-- true when this claim is too late to be given (see above)
+function A.LateClaim(key, guid)
+    local holders = A.Holders(key)
+    if #holders == 0 then return false end
+    for _, h in ipairs(holders) do if h.guid == guid then return false end end
+    local firstTs = holders[1].ts
+    if ns.Time() - firstTs <= A.LATE_HOURS * 3600 then return false end
+    if HadAddon(guid, firstTs) then return false end
+    return A.MostHaveIt(firstTs)
+end
+
 -- Remember that a character earned something (from the game for my own, from a message for the others).
 -- Only the earliest date per character and achievement is kept. Returns true when something changed.
 function A.Record(key, guid, name, ts, quiet, timeKnown)
@@ -126,6 +180,8 @@ function A.Record(key, guid, name, ts, quiet, timeKnown)
     ts = tonumber(ts)
     if not ts or ts < 1100000000 or ts > ns.Time() + 2 * 86400 then return false end
     if type(guid) ~= "string" or guid == "" then return false end
+    if not A.Eligible(guid, ts) then return false end
+    if not timeKnown and A.LateClaim(key, guid) then return false end
     name = tostring(name or "?"):gsub("[|]", ""):sub(1, 40)
     store[key] = store[key] or {}
     local old = store[key][guid]

@@ -13,7 +13,6 @@ local R = ns.Raids
 -- And the reminder window: 15 minutes before a raid that I (or an alt) signed up for, when the game is calm.
 ---------------------------------------------------------------------------
 local win = NewWindow("FetaFondueRaidInfo", 700, 660)
-win:SetFrameStrata("FULLSCREEN_DIALOG")
 win:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
 win:SetMovable(true)
 win:RegisterForDrag("LeftButton")
@@ -601,7 +600,7 @@ K.RegisterCloser(function() win:Hide() end)
 -- the reminder: 15 minutes before a raid I am signed up for
 ---------------------------------------------------------------------------
 local rem = NewWindow("FetaFondueRaidReminder", 400, 260)
-rem:SetFrameStrata("FULLSCREEN_DIALOG")
+rem:SetFrameStrata(K.STRATA_ALERT)
 rem:SetPoint("TOP", UIParent, "TOP", 0, -160)
 rem:SetMovable(true)
 rem:RegisterForDrag("LeftButton")

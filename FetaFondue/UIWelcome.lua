@@ -9,7 +9,6 @@ local NewWindow, Gold, Gray, BOX_BACKDROP = K.NewWindow, K.Gold, K.Gray, K.BOX_B
 ---------------------------------------------------------------------------
 -- not closed by Esc or by opening other panels (talents, character...): you are supposed to open those
 local win = NewWindow("FetaFondueWelcome", 700, 740, true)
-win:SetFrameStrata("FULLSCREEN_DIALOG")
 win:SetPoint("CENTER", 0, 0)
 win:SetMovable(true)
 win:RegisterForDrag("LeftButton")
@@ -205,7 +204,7 @@ end
 -- A newer version of the addon exists (a guildmate's addon said so): one window, once for each login
 ---------------------------------------------------------------------------
 local upd = NewWindow("FetaFondueUpdate", 440, 230)
-upd:SetFrameStrata("FULLSCREEN_DIALOG")
+upd:SetFrameStrata(K.STRATA_ALERT)
 upd:SetPoint("CENTER", UIParent, "CENTER", 0, 120)
 upd:SetMovable(true)
 upd:RegisterForDrag("LeftButton")

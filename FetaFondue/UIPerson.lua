@@ -10,7 +10,6 @@ do
 -- classic window has "Create").
 local PV_W, PV_H = 430, 612
 local pv = NewWindow("FetaFondueProfession", PV_W, PV_H)
-pv:SetFrameStrata("FULLSCREEN")
 pv:SetPoint("CENTER", UIParent, "CENTER", 240, 0)
 pv:SetMovable(true)
 pv:RegisterForDrag("LeftButton")

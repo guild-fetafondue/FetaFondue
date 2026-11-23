@@ -64,7 +64,7 @@ function P.ReadKnownProfessions()
             if index then
                 local name, _, rank, max, _, _, skillLine = GetProfessionInfo(index)
                 if name and skillLine then
-                    out[#out + 1] = { key = tostring(skillLine), name = P.ProfessionName(skillLine, name), rank = rank or 0, max = max or 0 }
+                    out[#out + 1] = { key = tostring(skillLine), name = P.ProfessionName(skillLine, name), raw = name, rank = rank or 0, max = max or 0 }
                 end
             end
         end
@@ -76,35 +76,90 @@ end
 
 local function Changed()
     if ns.Stats then ns.Stats.RebuildRecipes() end
+    if ns.Specs and ns.Specs.OnProfessionsChanged then ns.Specs.OnProfessionsChanged() end      -- (specializations and cooldowns of a profession that is gone)
     if ns.Sync then ns.Sync.OnLocalChange() end
     if ns.RefreshUI then ns.RefreshUI() end
 end
 
--- Adds professions we do not have yet, updates skill ranks and drops professions that were unlearned.
+-- The names of the skills the game's skills tab lists right now (a set), or nil when that cannot be read (functions missing or an empty
+-- answer). A second source next to GetProfessions: it can only ever VETO a removal ("the tab still lists it"), never cause one, so a
+-- name that does not match, or a collapsed header, can never make a profession disappear.
+local function SkillsTabNames()
+    if not (GetNumSkillLines and GetSkillLineInfo) then return nil end
+    local ok, set, n = pcall(function()
+        local names, count = {}, GetNumSkillLines() or 0
+        for i = 1, count do
+            local name, header = GetSkillLineInfo(i)
+            if name and not header then names[name] = true end
+        end
+        return names, count
+    end)
+    if ok and set and n and n > 0 then return set end
+    return nil
+end
+
+-- My professions come straight from the character's own skill lines (GetProfessions), no profession window needed. What the game
+-- lists is what I have. A profession it does not list any more is removed (with its recipes: they live inside the profession; the
+-- other characters who know it keep theirs), but only when
+--   1. the game's skills tab does not list it either (when that tab can be read), and
+--   2. it has been missing on two looks at least REMOVE_WAIT seconds apart (a profession that shows up in between starts over).
+-- Wrongly keeping one for half a minute costs nothing; wrongly dropping one loses its recipes until the window is scanned again.
+-- nil from the game = it could not be read: nothing is touched. Before the world is ready an empty list may just not be loaded yet.
+-- profsRev = when the list of my professions last changed: it travels with my advert so that the others drop what I dropped.
+local REMOVE_WAIT = 30
+local missingSince = {}          -- [profession key] = when it was first missing (this session only)
 function P.RefreshKnown()
     local own = ns.GetOwn()
     local known = P.ReadKnownProfessions()
-    if not own or not known or #known == 0 then return end
+    if not own or not known then return end
+    if #known == 0 and not ns.worldReady then return end
 
-    local changed = false
     local seen = {}
+    for _, k in ipairs(known) do seen[k.key] = true end
+    local tab
+    local now = ns.Now()
+    local drop, wait = {}, false
+    for key, p in pairs(own.profs) do
+        if tonumber(key) then
+            if seen[key] then
+                missingSince[key] = nil
+            else
+                tab = tab or SkillsTabNames() or false
+                if tab and p.raw and tab[p.raw] then
+                    missingSince[key] = nil          -- the skills tab still lists it: not gone
+                elseif not missingSince[key] then
+                    missingSince[key] = now          -- first look
+                    wait = true
+                elseif now - missingSince[key] >= REMOVE_WAIT then
+                    drop[#drop + 1] = key
+                else
+                    wait = true
+                end
+            end
+        end
+    end
+    if wait then ns.After(REMOVE_WAIT + 5, P.ScheduleKnownRefresh) end
+
+    local changed, listChanged = false, false
     for _, k in ipairs(known) do
-        seen[k.key] = true
         local p = own.profs[k.key]
         if not p then
-            own.profs[k.key] = { name = k.name, rank = k.rank, max = k.max, rev = ns.Time(), ids = {} }
-            changed = true
-        elseif p.rank ~= k.rank or p.max ~= k.max then
-            p.name, p.rank, p.max, p.rev = k.name, k.rank, k.max, ns.Time()
-            changed = true
+            own.profs[k.key] = { name = k.name, raw = k.raw, rank = k.rank, max = k.max, rev = ns.Time(), ids = {} }
+            changed, listChanged = true, true
+        else
+            p.raw = k.raw or p.raw          -- (the game's own spelling of the name, for the skills tab check)
+            if p.rank ~= k.rank or p.max ~= k.max then
+                p.name, p.rank, p.max, p.rev = k.name, k.rank, k.max, ns.Time()
+                changed = true
+            end
         end
     end
-    for key in pairs(own.profs) do
-        if not seen[key] and tonumber(key) then
-            own.profs[key] = nil
-            changed = true
-        end
+    for _, key in ipairs(drop) do
+        own.profs[key] = nil
+        missingSince[key] = nil
+        changed, listChanged = true, true
     end
+    if listChanged or not own.profsRev then own.profsRev = ns.Time() end
     if changed then Changed() end
     if ns.Achievements then ns.Achievements.CheckOwn() end      -- 300 skill = maxed out (guild firsts)
 end
@@ -308,6 +363,16 @@ local function SortedUnique(ids)
     return out
 end
 
+-- a short fingerprint of a list of recipe ids (the count and the ids themselves)
+local function IdSignature(list)
+    local s = 0
+    for _, id in ipairs(list) do s = (s * 31 + id) % 2147483647 end
+    return #list .. ":" .. s
+end
+
+local SHRINK_WAIT = 20          -- seconds between the two looks that must agree on a shorter recipe list
+local pendingShrink = {}        -- [profession key] = { sig, t } (this session only)
+
 -- Scans the profession window that is open right now.
 -- Returns true/false plus a message for /ff scan.
 function P.ScanOpen()
@@ -340,12 +405,24 @@ function P.ScanOpen()
         own.profs[key] = p
     end
 
-    -- Recipes are never forgotten, so a shorter list means the window was not fully loaded yet.
+    -- A shorter list than the one we hold is usually a window that is not fully loaded yet, so the first one is ignored. But recipes are
+    -- really lost when a specialization is unlearned: the same shorter list seen again at least SHRINK_WAIT seconds later (the window
+    -- has long finished loading by then) is believed and replaces the old one.
     if #ids < #p.ids then
-        return false, ("Ignored a partial list for %s (%d of %d recipes)."):format(display, #ids, #p.ids)
+        local sig = IdSignature(ids)
+        local now = ns.Now()
+        local pending = pendingShrink[key]
+        if pending and pending.sig == sig and now - pending.t >= SHRINK_WAIT then
+            pendingShrink[key] = nil
+        else
+            if not (pending and pending.sig == sig) then pendingShrink[key] = { sig = sig, t = now } end
+            return false, ("Ignored a partial list for %s (%d of %d recipes)."):format(display, #ids, #p.ids)
+        end
+    else
+        pendingShrink[key] = nil
     end
 
-    local changed = (#ids ~= #p.ids) or p.rank ~= rank or p.max ~= max or p.rev == 0
+    local changed = IdSignature(ids) ~= IdSignature(p.ids) or p.rank ~= rank or p.max ~= max or p.rev == 0
     local summary = ("%s (key %s): skill %d/%d, %d recipes%s, %d new recipe details."):format(display, key, rank, max, #ids, changed and ", updated" or ", unchanged", newDetails)
     if changed then
         p.name, p.rank, p.max, p.ids, p.rev = display, rank, max, ids, ns.Time()
@@ -552,4 +629,61 @@ function P.GuildRecipes()
         end
     end
     return out
+end
+
+---------------------------------------------------------------------------
+-- "Craft this" for a request (1.0.21): open my profession window on the recipe and put the quantity in, the player presses the game's own
+-- Create button. Nothing is crafted by us. Opening needs a click of the player (it comes from one); the quantity box is filled a moment later
+-- because the game resets it to 1 when it selects a recipe.
+---------------------------------------------------------------------------
+local function QuantityBoxes()
+    local boxes = {}
+    local function Add(f) if type(f) == "table" then boxes[#boxes + 1] = f end end
+    pcall(function() Add(ProfessionsFrame and ProfessionsFrame.CraftingPage and ProfessionsFrame.CraftingPage.CreateMultipleInputBox) end)
+    pcall(function() Add(TradeSkillFrame and TradeSkillFrame.DetailsFrame and TradeSkillFrame.DetailsFrame.CreateMultipleInputBox) end)
+    pcall(function() Add(_G.TradeSkillInputBox) end)
+    pcall(function() Add(_G.CraftInputBox) end)
+    return boxes
+end
+
+-- puts the number in the first quantity box this client has; true when one took it
+function P.FillQuantity(qty)
+    qty = math.max(1, math.floor(tonumber(qty) or 1))
+    for _, box in ipairs(QuantityBoxes()) do
+        if box.SetValue then
+            if pcall(box.SetValue, box, qty) then return true end
+        elseif box.SetNumber then
+            if pcall(box.SetNumber, box, qty) then return true end
+        end
+    end
+    return false
+end
+
+-- returns false when it could not even open the recipe
+function P.OpenToCraft(id, qty, name)
+    local inCombat = false
+    pcall(function() inCombat = InCombatLockdown and InCombatLockdown() or false end)
+    if inCombat then ns.Print("You cannot open your profession in combat.") return false end
+    local opened = false
+    pcall(function()
+        if C_TradeSkillUI and C_TradeSkillUI.OpenRecipe then opened = C_TradeSkillUI.OpenRecipe(id) ~= false end
+    end)
+    if not opened then
+        ns.Print("Open your profession window to craft this.")
+        return false
+    end
+    qty = math.max(1, math.floor(tonumber(qty) or 1))
+    local label = ("%d× %s"):format(qty, name or ("#" .. id))
+    -- a few tries: the window loads its recipe a moment after it opens, and selecting a recipe resets the amount
+    local tries, done = { 0.2, 0.6, 1.2, 2.5 }, false
+    for i, delay in ipairs(tries) do
+        ns.After(delay, function()
+            if P.FillQuantity(qty) then done = true end
+            if i == #tries then
+                if done then ns.Print(("Ready to craft %s: press Create."):format(label))
+                else ns.Print(("Craft %s: set the amount to %d and press Create."):format(label, qty)) end
+            end
+        end)
+    end
+    return true
 end

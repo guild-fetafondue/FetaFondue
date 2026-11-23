@@ -9,7 +9,18 @@ local R = ns.Raids
 -- (from the JSON of a Raid-Helper event); everybody who uses the addon sees them. The game's own calendar is not
 -- used at all.
 ---------------------------------------------------------------------------
-local panel = K.calendarPanel
+local root = K.calendarPanel
+
+-- two tabs on top (as in the Sweatshop and Management): Calendar (the month and the raids of the day) and the Planner
+local strip = K.NewTabStrip(root, 0)
+local calTab = strip:AddTab(0, "Calendar", 112)
+local planTab = strip:AddTab(116, "Planner", 112)
+local panel = K.NewPanel("FetaFondueCalendarPage", root, 800, 586)       -- (the calendar itself; "panel" is what the code below draws on)
+panel:SetPoint("TOPLEFT", root, "TOPLEFT", 0, -34)
+-- the Planner is laid out for a page that starts 66 below its top: this page starts 24 above the area, so its content begins right under the tabs
+local planPage = K.NewPanel("FetaFondueCompositionPage", root, 800, 590)
+planPage:SetPoint("TOPLEFT", root, "TOPLEFT", 0, 24)
+ns.UI.BuildComposition(planPage)
 
 local MONTHS = {
     "January", "February", "March", "April", "May", "June",
@@ -20,7 +31,7 @@ local RAID_COLOR = "ff9a3c"        -- not the gold of the headers, so it does no
 
 local CELL_W, CELL_H = 110, 62
 local GRID_X, GRID_Y = 15, -64
-local LABEL_Y = -483          -- the "Month day" label above the list of the selected day
+local LABEL_Y = -446          -- the "Month day" label above the list of the selected day
 
 local view = { year = nil, month = nil, selected = nil, days = {}, numDays = 0, firstWeekday = 1 }
 
@@ -159,31 +170,11 @@ for i = 1, 42 do cells[i] = NewCell(i) end
 ---------------------------------------------------------------------------
 local detailLabel = panel:Text("GameFontNormal", 15, LABEL_Y, 620)
 
--- "Advertise Discord": the invite is put into the chat box and whoever pressed the button presses Enter to send it (an addon cannot
--- send a chat message by itself)
-local advertise = K.NewButton(panel, "Advertise Discord")
-advertise:SetSize(150, 22)
-advertise:SetPoint("TOPLEFT", panel, "TOPLEFT", 15, -446)
-advertise:SetScript("OnClick", function()
-    K.OpenChatWith("FetaFondue Discord Server: " .. ns.DISCORD_INVITE)
-end)
-local paintEnter, paintLeave = advertise:GetScript("OnEnter"), advertise:GetScript("OnLeave")      -- (the button's own hover colour stays)
-advertise:SetScript("OnEnter", function(self)
-    if paintEnter then paintEnter(self) end
-    GameTooltip:SetOwner(self, "ANCHOR_TOP")
-    GameTooltip:SetText("Advertise Discord", 1, 1, 1)
-    GameTooltip:AddLine("Puts the invite to our Discord server into your chat box. Choose the channel you want, then press Enter to send it.", 0.8, 0.8, 0.8, true)
-    GameTooltip:Show()
-end)
-advertise:SetScript("OnLeave", function(self)
-    if paintLeave then paintLeave(self) end
-    GameTooltip:Hide()
-end)
 local detailBox = CreateFrame("Frame", nil, panel, "BackdropTemplate")
 detailBox:SetBackdrop(BOX_BACKDROP)
 detailBox:SetBackdropColor(0.045, 0.045, 0.05, 0.95)
 detailBox:SetBackdropBorderColor(0.22, 0.22, 0.25, 1)
-detailBox:SetPoint("TOPLEFT", panel, "TOPLEFT", 15, -502)
+detailBox:SetPoint("TOPLEFT", panel, "TOPLEFT", 15, -466)
 detailBox:SetSize(770, 98)
 
 local function RenderEventRow(row, item)
@@ -247,12 +238,6 @@ Refresh = function()
     title:SetText(("%s %d"):format(MONTHS[view.month] or "?", view.year))
     LoadMonth(view.year, view.month)
 
-    -- the Discord button sits in the middle between the last visible week of the grid and the day label below it
-    local weeks = math.ceil((view.firstWeekday - 1 + view.numDays) / 7)
-    local gridBottom = GRID_Y - (weeks - 1) * CELL_H - (CELL_H - 3)
-    advertise:ClearAllPoints()
-    advertise:SetPoint("TOPLEFT", panel, "TOPLEFT", 15, math.floor((gridBottom + LABEL_Y) / 2 + 11))
-
     for i, c in ipairs(cells) do
         local day = i - (view.firstWeekday - 1)
         if day >= 1 and day <= view.numDays then
@@ -307,9 +292,27 @@ todayButton:SetScript("OnClick", function()
 end)
 
 -- the tab was selected
-function ns.UI.OnCalendarShown()
-    Refresh()
+local currentSub = "calendar"
+local function ShowSub(id)
+    currentSub = id
+    panel:SetShown(id == "calendar")
+    planPage:SetShown(id == "planner")
+    calTab:UnlockHighlight() planTab:UnlockHighlight()
+    if id == "planner" then planTab:LockHighlight() else calTab:LockHighlight() end
+    if id == "planner" then
+        if ns.UI.RefreshComposition then ns.UI.RefreshComposition() end
+    else
+        Refresh()
+    end
 end
+calTab:SetScript("OnClick", function() ShowSub("calendar") end)
+planTab:SetScript("OnClick", function() ShowSub("planner") end)
+
+function ns.UI.OnCalendarShown()
+    ShowSub(currentSub)
+end
+panel:Show()                 -- (the Calendar page is the one shown when the tab opens)
+calTab:LockHighlight()
 
 function ns.UI.RefreshCalendar()
     if panel:IsShown() then Refresh() end

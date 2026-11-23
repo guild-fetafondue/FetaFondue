@@ -33,7 +33,7 @@ end
 local function NewToast()
     local f = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
     f:SetSize(WIDTH, HEIGHT)
-    f:SetFrameStrata("FULLSCREEN_DIALOG")
+    f:SetFrameStrata(K.STRATA_ALERT)
     f:SetBackdrop(K.BOX_BACKDROP)
     f:SetBackdropColor(0.04, 0.04, 0.05, 0.96)
     f:SetBackdropBorderColor(1, 0.82, 0, 1)

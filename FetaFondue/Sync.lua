@@ -198,6 +198,15 @@ local function AdvertMessages(guid, m)
         len = len + #part + 1
     end
     if #cur > 0 then msgs[#msgs + 1] = header .. table.concat(cur, ";") end
+    -- the full list of the professions this character has right now (1.0.5): whoever receives it drops every profession of this
+    -- character that is not in the list (a profession that was unlearned). The number is the time the list of professions last changed:
+    -- an older list never removes anything. Only sent when the owner's game was read (profsRev), and only when it fits one message
+    -- (a cut list would delete professions).
+    local listRev = tonumber(m.profsRev) or 0
+    if listRev > 0 then
+        local text = header .. ("L~%d~%s"):format(listRev, table.concat(keys, ","))
+        if #text <= MAX_MSG then msgs[#msgs + 1] = text end
+    end
     return msgs
 end
 
@@ -345,6 +354,33 @@ local function InRoster(guid)
     return roster.total < 1 or roster.byGUID[guid] ~= nil
 end
 
+-- A character's list of professions (L~time~key,key): every profession of his that is not in it was unlearned, so it goes, together
+-- with what hangs on it (specializations, cooldowns). The time of the removal is remembered (profGone) so that a stale copy of that
+-- profession, relayed by somebody who has not heard yet, cannot bring it back; a profession learned again later is newer and comes in.
+local function ApplyProfessionList(m, rev, keysText)
+    if rev <= (m.profsRev or 0) then return false end
+    local keep = {}
+    for key in keysText:gmatch("[%w_]+") do keep[key] = true end
+    local removed = false
+    for key in pairs(m.profs) do
+        if not keep[key] then
+            m.profs[key] = nil
+            m.profGone = m.profGone or {}
+            m.profGone[key] = rev
+            if ns.Specs and ns.Specs.DropProfession then ns.Specs.DropProfession(m, key) end
+            removed = true
+        end
+    end
+    m.profsRev = rev
+    return removed
+end
+
+-- was this profession of this character removed after the given revision of it was made?
+local function IsGone(m, key, rev)
+    local gone = m.profGone and m.profGone[key]
+    return gone ~= nil and rev <= gone
+end
+
 local function HandleAdvert(text, sender)
     local guid, name, rest = text:match("^A|([^|]+)|([^|]*)|(.*)$")
     if not guid or ns.IsMine(guid) or not InRoster(guid) then return end
@@ -359,24 +395,32 @@ local function HandleAdvert(text, sender)
         members[guid] = m
     end
     if name ~= "" then m.name = name end
+    if m.addonSince == nil then m.addonSince = m.seen and 0 or ns.Time() end
     m.seen = ns.Time()
 
     for part in rest:gmatch("[^;]+") do
-        local key, rank, max, rev, count, pname = part:match("^([%w_]+)~(%d+)~(%d+)~(%d+)~(%d+)~(.*)$")
-        if key then
-            rank, max, rev, count = tonumber(rank), tonumber(max), tonumber(rev), tonumber(count)
-            pname = ns.CleanText(pname)
-            local p = m.profs[key]
-            if not p then
-                p = { name = pname, rank = 0, max = 0, rev = 0, ids = {} }
-                m.profs[key] = p
-            end
-            if rev > p.rev then
-                p.name, p.rank, p.max = pname, rank, max
-                if count == 0 then
-                    p.ids, p.rev = {}, rev
-                else
-                    RequestData(guid, key, rev)
+        local listRev, listKeys = part:match("^L~(%d+)~([%w_,]*)$")
+        if listRev then
+            ApplyProfessionList(m, tonumber(listRev), listKeys)
+        else
+            local key, rank, max, rev, count, pname = part:match("^([%w_]+)~(%d+)~(%d+)~(%d+)~(%d+)~(.*)$")
+            if key then
+                rank, max, rev, count = tonumber(rank), tonumber(max), tonumber(rev), tonumber(count)
+                pname = ns.CleanText(pname)
+                if not IsGone(m, key, rev) then
+                    local p = m.profs[key]
+                    if not p then
+                        p = { name = pname, rank = 0, max = 0, rev = 0, ids = {} }
+                        m.profs[key] = p
+                    end
+                    if rev > p.rev then
+                        p.name, p.rank, p.max = pname, rank, max
+                        if count == 0 then
+                            p.ids, p.rev = {}, rev
+                        else
+                            RequestData(guid, key, rev)
+                        end
+                    end
                 end
             end
         end
@@ -437,6 +481,7 @@ local function ApplyData(guid, key, rev, rank, max, payload)
         m = { name = "?", profs = {} }
         members[guid] = m
     end
+    if IsGone(m, key, rev) then return end          -- (an old copy of a profession that was unlearned)
     local p = m.profs[key]
     if not p then
         p = { name = key, rank = 0, max = 0, rev = 0, ids = {} }
@@ -444,6 +489,7 @@ local function ApplyData(guid, key, rev, rank, max, payload)
     end
     if rev > p.rev then
         p.ids, p.rev, p.rank, p.max = ids, rev, rank, max
+        if m.addonSince == nil then m.addonSince = m.seen and 0 or ns.Time() end
         m.seen = ns.Time()
     end
     Refresh()
@@ -713,7 +759,7 @@ local function AdvertiseStats(guid, name, st)
         Enqueue(("S|%s|%d|0|0"):format(guid, st.fish or 0), "GUILD")      -- (the two zeros are what older versions sent for falls and camps)
     end
 
-    local race, role, tree
+    local race, role, tree, setupsOf
     if guid == ns.myGUID then
         if ns.Inspect and own then
             local r1, r2, r3 = ns.Inspect.OwnSummary()
@@ -721,16 +767,45 @@ local function AdvertiseStats(guid, name, st)
             if race and race ~= "" then own.race = race end
             if role and role ~= "" then own.role = role end
             if tree and tree ~= "" then own.tree = tree end
+            if ns.Inspect.RefreshOwn then ns.Inspect.RefreshOwn() end       -- (both talent setups; the active one decides tree and role)
         end
         race, role, tree = own and own.race, own and own.role, own and own.tree
+        setupsOf = own
     else
         local mm = members and members[guid]
         race, role, tree = mm and mm.race, mm and mm.role, mm and mm.tree
+        setupsOf = mm
     end
     if tree and tree ~= "" then Enqueue(("PS|%s|%s"):format(guid, (tree:gsub("[^%a ]", ""):sub(1, 24))), "GUILD") end
     if (race and race ~= "") or (role and role ~= "") then
         Enqueue(("P|%s|%s|%s"):format(guid, (race or ""):gsub("[^%w ]", ""):gsub(" ", "_"), role or ""), "GUILD")
     end
+    S.EnqueueSetups(guid, setupsOf)
+end
+
+-- Both talent setups of a character (dual specialization), the active one first: PX|guid|time|role:Tree|role:Tree. The time is when the
+-- owner's setups last changed: a copy relayed by somebody who has not heard of a respec yet is older and never replaces a newer one.
+-- (PS and P above carry only the active tree and role, for versions before 1.0.5.)
+function S.EnqueueSetups(guid, m)
+    if not (m and m.setups and #m.setups > 0 and (tonumber(m.setupsRev) or 0) > 0) then return end
+    local parts = {}
+    for i, s in ipairs(m.setups) do
+        if i > 2 then break end
+        local tree = tostring(s.tree or ""):gsub("[^%a ]", ""):sub(1, 24)
+        if tree ~= "" then parts[#parts + 1] = ((s.role and s.role ~= "") and s.role or "-") .. ":" .. tree end
+    end
+    if #parts > 0 then Enqueue(("PX|%s|%d|%s"):format(guid, m.setupsRev, table.concat(parts, "|")), "GUILD") end
+end
+
+-- my talents changed (respec, the other specialization made active): tell the guild at once
+function S.AdvertiseOwnTalents()
+    local own = ns.GetOwn()
+    if not (own and ns.guildName and started) then return end
+    if own.tree and own.tree ~= "" then Enqueue(("PS|%s|%s"):format(ns.myGUID, (own.tree:gsub("[^%a ]", ""):sub(1, 24))), "GUILD") end
+    if own.role and own.role ~= "" then
+        Enqueue(("P|%s|%s|%s"):format(ns.myGUID, (own.race or ""):gsub("[^%w ]", ""):gsub(" ", "_"), own.role), "GUILD")
+    end
+    S.EnqueueSetups(ns.myGUID, own)
 end
 
 function S.AdvertiseOwnStats()
@@ -806,16 +881,48 @@ local function OwnCharactersHere()
     return out
 end
 
+-- when somebody last sent the specializations / cooldowns of a character (so that the relay below does not repeat what was just said)
+local lastSpecAdvert = {}
+
+-- the specializations of one character (mine, or a guildie's as I hold them: the relay)
+local function SendSpecs(guid, ch)
+    if not ch.specs then return false end
+    local ids = {}
+    for id in pairs(ch.specs) do ids[#ids + 1] = id end
+    table.sort(ids)
+    Enqueue(("SP|%s|%d|%s"):format(guid, ch.specsRev or 0, table.concat(ids, ",")), "GUILD")
+    return true
+end
+
+-- the profession cooldowns of one character
+local function SendCooldowns(guid, ch, spells)
+    if not ch.cds or next(ch.cds) == nil then return false end
+    local header = ("CD|%s|"):format(guid)
+    local cur, len = {}, #header
+    local function Flush()
+        if #cur > 0 then Enqueue(header .. table.concat(cur, ";"), "GUILD") end
+        cur, len = {}, #header
+    end
+    local cdIDs = {}
+    for id in pairs(ch.cds) do cdIDs[#cdIDs + 1] = id end
+    table.sort(cdIDs)
+    for _, id in ipairs(cdIDs) do
+        local endTime = ch.cds[id]
+        if ns.Specs.Plausible(endTime) then          -- (a wrong end time is not passed on)
+            local part = ("%d:%s:%d"):format(id, tostring(spells[id] or "0"), endTime or 0)
+            if len + #part + 1 > MAX_MSG then Flush() end
+            cur[#cur + 1] = part
+            len = len + #part + 1
+        end
+    end
+    Flush()
+    return true
+end
+
 function S.AdvertiseSpecs()
     if not (ns.guildName and ns.DB) then return end
     for _, guid in ipairs(OwnCharactersHere()) do
-        local ch = ns.DB.mine[guid]
-        if ch.specs then
-            local ids = {}
-            for id in pairs(ch.specs) do ids[#ids + 1] = id end
-            table.sort(ids)
-            Enqueue(("SP|%s|%d|%s"):format(guid, ch.specsRev or 0, table.concat(ids, ",")), "GUILD")
-        end
+        SendSpecs(guid, ns.DB.mine[guid])
     end
 end
 
@@ -823,26 +930,7 @@ function S.AdvertiseCooldowns()
     if not (ns.guildName and ns.DB and ns.Specs) then return end
     local spells = ns.Specs.CooldownSpells()
     for _, guid in ipairs(OwnCharactersHere()) do
-        local ch = ns.DB.mine[guid]
-        if ch.cds then
-            local header = ("CD|%s|"):format(guid)
-            local cur, len = {}, #header
-            local function Flush()
-                if #cur > 0 then Enqueue(header .. table.concat(cur, ";"), "GUILD") end
-                cur, len = {}, #header
-            end
-            local cdIDs = {}
-            for id in pairs(ch.cds) do cdIDs[#cdIDs + 1] = id end
-            table.sort(cdIDs)
-            for _, id in ipairs(cdIDs) do
-                local endTime = ch.cds[id]
-                local part = ("%d:%s:%d"):format(id, tostring(spells[id] or "0"), endTime or 0)
-                if len + #part + 1 > MAX_MSG then Flush() end
-                cur[#cur + 1] = part
-                len = len + #part + 1
-            end
-            Flush()
-        end
+        SendCooldowns(guid, ns.DB.mine[guid], spells)
     end
 end
 
@@ -851,6 +939,7 @@ local function HandleSpecs(text)
     if not guid or ns.IsMine(guid) then return end
     local m = FindMember(guid)
     if not m then return end
+    lastSpecAdvert[guid] = ns.Now()
     rev = tonumber(rev)
     if rev < (m.specsRev or 0) then return end
     local specs, n = {}, 0
@@ -868,6 +957,7 @@ local function HandleCooldowns(text)
     if not guid or ns.IsMine(guid) then return end
     local m = FindMember(guid)
     if not m then return end
+    lastSpecAdvert[guid] = ns.Now()
     local db = ns.DB
     db.cdSpells = db.cdSpells or {}
     m.cds = m.cds or {}
@@ -877,9 +967,15 @@ local function HandleCooldowns(text)
         if n > 40 then break end
         local id, endTime = tonumber(idText), tonumber(endText)
         if key ~= "0" and not db.cdSpells[id] and not ns.Specs.SEED[id] then db.cdSpells[id] = key end
-        -- the later end time wins (a cooldown that was used again); a ready cooldown (0) only replaces one that has run out
+        -- the later end time wins (a cooldown that was used again); a ready cooldown (0) only replaces one that has run out.
+        -- An end time that is further away than any cooldown can be is a wrong value (the game's clock wrapped on the sender's side): it is not kept,
+        -- and one that we already hold is replaced by anything sensible.
         local old = m.cds[id]
-        if old == nil or endTime > old or ns.Specs.Remaining(old) == 0 then m.cds[id] = endTime end
+        if ns.Specs.Plausible(endTime) then
+            if old == nil or not ns.Specs.Plausible(old) or endTime > old or ns.Specs.Remaining(old) == 0 then m.cds[id] = endTime end
+        elseif old ~= nil and not ns.Specs.Plausible(old) then
+            m.cds[id] = nil
+        end
     end
     Refresh()
 end
@@ -1102,6 +1198,13 @@ local function Relay()
     relayPending = false
     local members = ns.GetMembers()
     if not members then return end
+    -- only what we hold about people who are still in the guild is passed on (somebody who left or was kicked may still be in our data
+    -- until the next clean-up)
+    local live = {}
+    for guid, m in pairs(members) do
+        if ns.IsMine(guid) or InRoster(guid) then live[guid] = m end
+    end
+    members = live
     local now, count = ns.Now(), 0
     for guid, m in pairs(members) do
         if count >= RELAY_MAX then break end
@@ -1122,6 +1225,27 @@ local function Relay()
             elseif m.stats then
                 AdvertiseStats(guid, m.name, m.stats)
                 count = count + 1
+            end
+        end
+    end
+    -- specializations and profession cooldowns of guildies that nobody has pushed lately (1.0.5): until now only the owner ever sent them, so
+    -- somebody who logged in later saw the cooldowns of a guildie who was offline only once that guildie logged in again. End times are absolute
+    -- times, a relayed copy can only be older, and a later end time always wins on the receiving side. Own budget, so the professions above
+    -- cannot use it up.
+    do
+        local spells = ns.Specs and ns.Specs.CooldownSpells and ns.Specs.CooldownSpells() or {}
+        local extra = 0
+        for guid, m in pairs(members) do
+            if extra >= RELAY_MAX then break end
+            if not ns.IsMine(guid) and now - (lastSpecAdvert[guid] or -1e9) > RELAY_GAP then
+                local did = false
+                if m.specs and (m.specsRev or 0) > 0 and SendSpecs(guid, m) then did = true end
+                if SendCooldowns(guid, m, spells) then did = true end
+                if m.setups and (m.setupsRev or 0) > 0 then S.EnqueueSetups(guid, m) did = true end
+                if did then
+                    lastSpecAdvert[guid] = now
+                    extra = extra + 1
+                end
             end
         end
     end
@@ -1610,6 +1734,7 @@ local function HandleStatus(text)
         m = { name = entry and entry.name or "?", profs = {} }
         all[guid] = m
     end
+    if m.addonSince == nil then m.addonSince = m.seen and 0 or ns.Time() end
     m.seen = ns.Time()
     m.diag = {
         version = ver, build = build, session = tonumber(session), inN = tonumber(inN), outN = tonumber(outN), errors = tonumber(errors),
@@ -1796,7 +1921,9 @@ local function HandleCharInfo(text)
     local m = members and members[guid]
     if not m then return end
     if race ~= "" then m.race = (race:gsub("_", " ")) end
-    if role ~= "" then m.role = role end
+    -- (the role and the tree of the ACTIVE talents; once the character's setups are known (PX) they decide, and a copy relayed by somebody who
+    -- has not heard of a respec yet must not put the old role back)
+    if role ~= "" and not m.setupsRev then m.role = role end
 end
 
 -- the main talent tree of a character (for the spec chart): PS|guid|tree name (the older numeric form is ignored)
@@ -1806,7 +1933,33 @@ local function HandleCharSpec(text)
     local members = ns.GetMembers()
     local m = members and members[guid]
     if not m then return end
-    if #tree <= 24 then m.tree = tree end
+    if #tree <= 24 and not m.setupsRev then m.tree = tree end
+end
+
+-- both talent setups of a character, the active one first: PX|guid|time|role:Tree|role:Tree (role T, H, D, F, B, C, Y or - when not known).
+-- A message older than what we hold is ignored. m.tree and m.role follow the active setup.
+local function HandleSetups(text)
+    local guid, rev, rest = text:match("^PX|([^|]+)|(%d+)|(.+)$")
+    if not guid or ns.IsMine(guid) then return end
+    local m = FindMember(guid)
+    if not m then return end
+    rev = tonumber(rev)
+    if rev < (m.setupsRev or 0) then return end
+    local list = {}
+    for role, tree in rest:gmatch("([%u%-]):(%a[%a ]*)") do
+        if #list >= 2 then break end
+        if #tree <= 24 and (role == "-" or ns.Inspect.CODE_ROLE[role]) then
+            list[#list + 1] = { tree = tree, role = role ~= "-" and role or "" }
+        end
+    end
+    if #list == 0 then return end
+    lastSpecAdvert[guid] = ns.Now()
+    -- setupsAt = when WE learned of this version (a repeat of the same version does not make it newer than a profile scanned since)
+    if rev ~= (m.setupsRev or 0) or not m.setupsAt then m.setupsAt = ns.Time() end
+    m.setups, m.setupsRev = list, rev
+    m.tree = list[1].tree
+    if list[1].role ~= "" then m.role = list[1].role end
+    Refresh()
 end
 
 -- which installation (person) a character belongs to, and when that character first submitted data:
@@ -1954,9 +2107,17 @@ local function RateOK(sender)
     return true
 end
 
+S.RosterGate = true          -- (tests that use made-up senders switch it off)
 function S.OnMessage(text, sender, channel)
     if not RateOK(sender) then counters.dropped = counters.dropped + 1 return end
     if not ns.guildName or (channel ~= "GUILD" and channel ~= "OFFICER") then return end
+    -- somebody who is not in the guild (any more: left or kicked) is not listened to, whatever he sends. Only checked once the roster is
+    -- loaded (before that nobody can be told apart), and never for my own messages.
+    local roster = ns.GetRoster()
+    if S.RosterGate and roster.total >= 1 and sender ~= ns.me and not ns.RosterFind(roster, sender) then
+        counters.dropped = counters.dropped + 1
+        return
+    end
     counters.inN = counters.inN + 1
     local kind = text:sub(1, 2)
     -- the officer note travels on the OFFICER channel; everything else on the guild channel
@@ -1975,6 +2136,7 @@ function S.OnMessage(text, sender, channel)
     elseif kind == "X|" then HandleCraftsX(text)
     elseif kind == "SP" then HandleSpecs(text)
     elseif kind == "PS" then HandleCharSpec(text)
+    elseif kind == "PX" then HandleSetups(text)
     elseif kind == "CD" then HandleCooldowns(text)
     elseif kind == "S|" then HandleGameStats(text)
     elseif kind == "GB" then HandleGuildBank(text)

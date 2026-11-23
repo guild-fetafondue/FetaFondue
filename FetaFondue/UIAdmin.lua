@@ -237,7 +237,6 @@ announce:SetScript("OnClick", function()
 end)
 
 local report = NewWindow("FetaFondueReport", 700, 520)
-report:SetFrameStrata("FULLSCREEN_DIALOG")
 report:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
 report:SetTitle("Report: select all with Ctrl+A, copy with Ctrl+C")
 local rscroll = CreateFrame("ScrollFrame", "FetaFondueReportScroll", report)

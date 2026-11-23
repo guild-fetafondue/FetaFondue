@@ -41,6 +41,21 @@ function ns.AddRequest(recipeID, name, qty)
     return r
 end
 
+-- Favourite items of the Sweatshop (mine only: saved on this installation, never sent to the guild).
+function ns.IsFavourite(id)
+    return ns.DB ~= nil and ns.DB.favourites ~= nil and ns.DB.favourites[id] == true
+end
+function ns.SetFavourite(id, on)
+    if not ns.DB then return end
+    ns.DB.favourites = ns.DB.favourites or {}
+    ns.DB.favourites[id] = on and true or nil
+end
+function ns.FavouriteCount()
+    local n = 0
+    for _ in pairs((ns.DB and ns.DB.favourites) or {}) do n = n + 1 end
+    return n
+end
+
 -- Total materials for a quantity: reagents per craft times the number of crafts needed.
 -- Returns list of { id, count }, crafts, amount made per craft.
 function ns.TotalMaterials(info, qty)

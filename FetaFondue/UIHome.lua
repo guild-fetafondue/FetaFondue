@@ -22,12 +22,6 @@ local function NewBox(x, y, w, h)
     return box
 end
 
--- top right: invite somebody to the guild (only for those who may; the window itself is in UIManagement.lua) ----
-local guildInviteButton = K.NewButton(home, "Invite to guild")
-guildInviteButton:SetSize(130, 24)
-guildInviteButton:SetPoint("TOPRIGHT", home, "TOPRIGHT", 0, -2)
-guildInviteButton:SetScript("OnClick", function() if ns.UI.OpenGuildInvite then ns.UI.OpenGuildInvite() end end)
-
 -- FetaFondue Forever: five stat tiles ------------------------------------
 local foreverHeader = home:Text("GameFontNormalLarge", 0, -4, 400)
 
@@ -350,15 +344,14 @@ local function RefreshHome()
     -- Forever
     foreverHeader:SetText(guild .. " Forever")
     local d, b, c, g, n, users = ns.GetForeverStats()
-    tileDungeons.number:SetText(Commas(d))
-    tileBosses.number:SetText(Commas(b))
-    tileCrafts.number:SetText(Commas(c))
-    tileGold.number:SetText(Commas(g / 10000) .. COIN)
+    tileDungeons.number:SetText(K.Short(d))
+    tileBosses.number:SetText(K.Short(b))
+    tileCrafts.number:SetText(K.Short(c))
+    tileGold.number:SetText(K.Short(g / 10000) .. COIN)
     local bank = ns.GetGuildBank()
-    tileBank.number:SetText(bank and (Commas(bank / 10000) .. COIN) or "-")
+    tileBank.number:SetText(bank and (K.Short(bank / 10000) .. COIN) or "-")
     if bank then tileBank.number:SetTextColor(1, 0.82, 0) else tileBank.number:SetTextColor(0.5, 0.5, 0.5) end
 
-    guildInviteButton:SetShown(ns.CanInviteToGuild())
 
     -- requests (the ones this character can craft first)
     workHeader:SetText(guild .. " Sweatshop")

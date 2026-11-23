@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: FetaFondue
 ## Notes: Guild addon for FetaFondue: who is online and where, guild stats, and the Sweatshop (who can craft what, requests), events and inspect.
-## Version: 1.0.4
+## Version: 1.1.2
 ## OptionalDeps: ProfessionMaster
 ## SavedVariables: FetaFondueDB
 
@@ -13,12 +13,14 @@ Sync.lua
 Requests.lua
 Stats.lua
 Inspect.lua
+Composition.lua
 Officer.lua
 Blacklist.lua
 Achievements.lua
 Raids.lua
 Invite.lua
 TalentProbe.lua
+StatProbe.lua
 UIKit.lua
 UIMain.lua
 UIRequests.lua
@@ -32,6 +34,7 @@ UIAlts.lua
 UIAnalytics.lua
 UIAchievements.lua
 UIToast.lua
+UIComposition.lua
 UICalendar.lua
 UIManagement.lua
 UIDiscord.lua

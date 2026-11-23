@@ -9,10 +9,11 @@ local NewWindow, ItemData, QUALITY_HEX, Shifted, SendToChat, Gold, Gray, QUESTIO
 -- worked out from where the talent points are. Gear tab: a paper doll like the character panel.
 -- Talents tab: the class's talent trees, laid out by the game's own data, with the points picked.
 ---------------------------------------------------------------------------
-local WIN_W, WIN_H = 770, 750
+-- the left part (header, Gear / Talents) is 770 wide; the stats column sits to the right of it, outside the two tabs
+local LEFT_W, STAT_W = 770, 268
+local WIN_W, WIN_H = LEFT_W + STAT_W, 750
 local win = NewWindow("FetaFondueInspect", WIN_W, WIN_H)
-win:SetFrameStrata("FULLSCREEN")
-win:SetPoint("CENTER", UIParent, "CENTER", 200, 0)
+win:SetPoint("CENTER", UIParent, "CENTER", 100, 0)
 win:SetMovable(true)
 win:RegisterForDrag("LeftButton")
 win:SetScript("OnDragStart", win.StartMoving)
@@ -29,6 +30,7 @@ pcall(roleText.SetFont, roleText, "Fonts\\MORPHEUS.TTF", 22, "OUTLINE")   -- a d
 -- right side: online (green glow) or last seen (gray), and the day the member joined the guild
 local presenceText = win:Text("GameFontNormal", 520, -48, 220, "RIGHT")
 pcall(presenceText.SetFont, presenceText, "Fonts\\FRIZQT__.TTF", 14, "OUTLINE")
+pcall(presenceText.SetWordWrap, presenceText, false)          -- (one line, never into the join date below)
 local joinedText = win:Text("GameFontDisable", 520, -70, 220, "RIGHT")
 local altsText = win:Text("GameFontDisableSmall", 440, -88, 300, "RIGHT")
 local roleTree = win:Text("GameFontDisable", 330, -114, 360)      -- (the other spec, when there are two)
@@ -184,28 +186,55 @@ profNone:SetPoint("TOP", crestInfo, "BOTTOM", 0, -22)
 -- connected talents.
 ---------------------------------------------------------------------------
 local talentSummary = talentPane:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-talentSummary:SetPoint("TOPLEFT", talentPane, "TOPLEFT", 14, -10)
+talentSummary:SetPoint("TOPRIGHT", talentPane, "TOPRIGHT", -14, -10)
 local talentNote = talentPane:CreateFontString(nil, "ARTWORK", "GameFontDisable")
 talentNote:SetPoint("CENTER", talentPane, "CENTER", 0, 0)
 talentNote:SetWidth(520)
 talentNote:SetJustifyH("CENTER")
 
--- dual specialization: one button per talent setup, the active one is marked
-local specButtons = {}
-local function SpecButton(i)
-    local b = specButtons[i]
+-- dual specialization: two sub-tabs inside Talents, Primary (talent group 1) and Secondary (group 2). The tab that is selected is
+-- highlighted like the Gear / Talents tabs; the one whose talents are ACTIVE in the game has a pulsing gold glow around it.
+local subTabs = {}
+local SUB_NAMES = { "Primary", "Secondary" }
+local function SubTab(g)
+    local b = subTabs[g]
     if not b then
-        b = K.NewButton(talentPane, "")
-        b:SetSize(250, 22)
-        b:SetPoint("TOPRIGHT", talentPane, "TOPRIGHT", -14 - (2 - i) * 258, -8)
-        b.setupIndex = i
+        b = K.NewButton(talentPane, SUB_NAMES[g])
+        b:SetSize(120, 22)
+        b:SetPoint("TOPLEFT", talentPane, "TOPLEFT", 14 + (g - 1) * 128, -6)
+        b.group = g
+        b.glow = b:CreateTexture(nil, "BACKGROUND")
+        b.glow:SetPoint("TOPLEFT", b, "TOPLEFT", -3, 3)
+        b.glow:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", 3, -3)
+        b.glow:SetColorTexture(1, 0.82, 0, 0.5)
+        b.glow:Hide()
+        b.pulse = 0
+        b:SetScript("OnUpdate", function(self, elapsed)
+            if not self.glow:IsShown() then return end
+            self.pulse = (self.pulse or 0) + (elapsed or 0)
+            self.glow:SetAlpha(0.55 + 0.35 * math.sin(self.pulse * 3))
+        end)
         b:SetScript("OnClick", function(self)
-            insp.specIndex = self.setupIndex
+            insp.subTab = self.group
             ns.UI.RefreshInspect()
         end)
-        specButtons[i] = b
+        subTabs[g] = b
     end
     return b
+end
+
+-- which setup of the profile is Primary and which is Secondary: by the talent group each one says it is; a setup that does not say takes
+-- the first free place. Two tabs are shown when both are known, or when the only one we have is group 2 (so there is a first one too).
+local function SetupTabs(setups)
+    local tabs, loose = {}, {}
+    for n, sp in ipairs(setups) do
+        if (sp.group == 1 or sp.group == 2) and not tabs[sp.group] then tabs[sp.group] = n else loose[#loose + 1] = n end
+    end
+    for _, n in ipairs(loose) do
+        if not tabs[1] then tabs[1] = n elseif not tabs[2] then tabs[2] = n end
+    end
+    local dual = (tabs[1] ~= nil and tabs[2] ~= nil) or tabs[2] ~= nil
+    return tabs, dual
 end
 
 local NODE = 30
@@ -309,16 +338,59 @@ local function TalentView(profile, sp)
     return { groups = groups, total = total, points = points }
 end
 
+-- No talent data for this character, but the class is known: when anybody's talents of that class were seen (so its layout is known),
+-- the three trees are drawn without a single point, to be shown grayed. nil when no layout of the class is known.
+local function EmptyView(classFile)
+    if not classFile or classFile == "" then return nil end
+    for _, pr in pairs(ns.DB.inspect or {}) do
+        if pr.class == classFile and (pr.spec or 0) > 0 then
+            local layout = ns.Inspect.GetLayout(pr.spec, pr.level)
+            if layout then
+                local all = {}
+                for _, n in ipairs(layout.nodes) do
+                    all[#all + 1] = { id = n.id, x = n.x, y = n.y, max = n.max, spell = n.spell, edges = n.edges, rank = 0 }
+                end
+                return { groups = ns.Inspect.GroupNodes(all), total = 0, points = {}, gray = true }
+            end
+        end
+    end
+    return nil
+end
+
 local function RenderTalents(view, why, classFile)
     for _, p in ipairs(panels) do p:Hide() end
     for _, n in ipairs(nodes) do n:Hide() end
     for _, l in ipairs(lines) do if l then l:Hide() end end
+    for _, p in ipairs(panels) do p:SetAlpha(1) end
+    for _, n in ipairs(nodes) do n:SetAlpha(1) end
+    for _, l in ipairs(lines) do if l and l.SetAlpha then l:SetAlpha(1) end end
+    talentNote:ClearAllPoints()
+    talentNote:SetPoint("CENTER", talentPane, "CENTER", 0, 0)
     if not view then
         talentSummary:SetText("")
-        if why == "layout" then
+        -- the class is known, so its trees are: three grayed panels with their names, the explanation underneath
+        local treeNames = ns.Inspect.TREES[classFile]
+        if treeNames and #treeNames > 0 then
+            local count, gap = #treeNames, 10
+            local w = (PANE_W - 28 - gap * (count - 1)) / count
+            for gi = 1, count do
+                local panel = GetPanel(gi)
+                panel:ClearAllPoints()
+                panel:SetPoint("TOPLEFT", talentPane, "TOPLEFT", 14 + (gi - 1) * (w + gap), -30)
+                panel:SetSize(w, PANE_H - 40 - 90)
+                panel.title:SetText(Gray(treeNames[gi]))
+                panel:SetAlpha(0.45)
+                panel:Show()
+            end
+            talentNote:ClearAllPoints()
+            talentNote:SetPoint("BOTTOM", talentPane, "BOTTOM", 0, 14)
+        end
+        if why == "unseen" then
+            talentNote:SetText("These talents have not been seen yet.\nThey are read when the character switches to them.")
+        elseif why == "layout" then
             talentNote:SetText("The layout of this class's talent tree is not known here yet.\nIt is asked from the guild: a guildmate who plays this class shares it.")
         else
-            talentNote:SetText("No talents yet.\nThe game hands them out after inspecting a player close enough, otherwise they come from the guildie's own FetaFondue (0.26 or newer).")
+            talentNote:SetText("")
         end
         return
     end
@@ -415,6 +487,206 @@ local function RenderTalents(view, why, classFile)
 end
 
 ---------------------------------------------------------------------------
+-- The stats column (right of the tabs, the same for Gear and Talents): the average item level on top, then the stats grouped like the
+-- game's character panel. Zero (or unknown) values are left out, a group without values too. Only a character whose own addon
+-- shared its stats has any; Crit and Haste show the highest of melee / ranged / spell (as the game's panel does) and the tooltip
+-- lists all three.
+---------------------------------------------------------------------------
+local statBox = CreateFrame("Frame", nil, win, "BackdropTemplate")
+statBox:SetBackdrop(BOX_BACKDROP)
+statBox:SetBackdropColor(0.045, 0.045, 0.05, 0.95)
+statBox:SetBackdropBorderColor(0.22, 0.22, 0.25, 1)
+statBox:SetPoint("TOPLEFT", win, "TOPLEFT", LEFT_W - 8, -44)
+statBox:SetPoint("BOTTOMRIGHT", win, "BOTTOMRIGHT", -24, 22)
+
+local ilvlText = statBox:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+ilvlText:SetPoint("TOP", statBox, "TOP", 0, -12)
+pcall(ilvlText.SetFont, ilvlText, "Fonts\\FRIZQT__.TTF", 26, "OUTLINE")
+ilvlText:SetTextColor(0.64, 0.21, 0.93)
+local ilvlCaption = statBox:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+ilvlCaption:SetPoint("TOP", ilvlText, "BOTTOM", 0, -4)
+local statNote = statBox:CreateFontString(nil, "ARTWORK", "GameFontDisable")
+statNote:SetPoint("CENTER", statBox, "CENTER", 0, 20)
+statNote:SetWidth(STAT_W - 60)
+statNote:SetJustifyH("CENTER")
+
+local PERCENT1, PERCENT2 = "%.1f%%", "%.2f%%"
+local POWER_NAMES = { [0] = "Mana", [1] = "Rage", [2] = "Focus", [3] = "Energy" }
+local function Highest(st, a, b, c) return math.max(st[a] or 0, st[b] or 0, st[c] or 0) end
+local function Whole(key) return function(st) return st[key] and K.Commas(st[key]) or nil end end
+local function Percent(key, fmt) return function(st) return st[key] and fmt:format(st[key]) or nil end end
+
+-- tooltip text of crit and haste: the highest is shown, the three are listed
+local statLevel = 0
+local function Breakdown(kind)
+    return function(st)
+        local lines
+        if kind == "armor" then
+            -- the percentage comes from the game's own function when it has one
+            local percent
+            pcall(function()
+                if PaperDollFrame_GetArmorReduction and st.armor and statLevel > 0 then percent = PaperDollFrame_GetArmorReduction(st.armor, statLevel) end
+            end)
+            if type(percent) == "number" then
+                lines = { { "Reduces Physical Damage taken by %.2f%%", percent } }
+            else
+                lines = { { "Reduces Physical Damage taken", 0 } }
+            end
+        elseif kind == "crit" then
+            lines = { { "Increases Melee critical chance by %.2f%%", st.cm }, { "Increases Ranged critical chance by %.2f%%", st.cr },
+                { "Increases Spell critical chance by %.2f%%", st.cs } }
+        else
+            lines = { { "Increases Melee attack speed by %.2f%%", st.hm }, { "Increases Ranged attack speed by %.2f%%", st.hr },
+                { "Increases Spell casting speed by %.2f%%", st.hs } }
+        end
+        return lines
+    end
+end
+
+local SECTIONS = {
+    { title = "General", line = { 0.75, 0.65, 0.3 }, rows = {
+        { "Health", Whole("hp") },
+        { "Mana", function(st) return st.pw and K.Commas(st.pw) or nil end, label = function(st) return POWER_NAMES[st.pt or 0] or "Mana" end },
+    } },
+    { title = "Attributes", line = { 0.3, 0.7, 0.3 }, rows = {
+        { "Strength", Whole("str") }, { "Agility", Whole("agi") }, { "Stamina", Whole("sta") }, { "Intellect", Whole("int") }, { "Spirit", Whole("spi") },
+    } },
+    { title = "Weapons", line = { 0.9, 0.35, 0.2 }, rows = {
+        { "Attack Power", Whole("ap") }, { "Ranged Attack Power", Whole("rap") },
+    } },
+    { title = "Modifiers", line = { 0.6, 0.3, 0.9 }, rows = {
+        { "Critical Strike", function(st) local v = Highest(st, "cm", "cr", "cs") return v > 0 and PERCENT1:format(v) or nil end, tip = "crit", head = "Critical Strike" },
+        { "Haste", function(st) local v = Highest(st, "hm", "hr", "hs") return v > 0 and PERCENT1:format(v) or nil end, tip = "haste", head = "Haste" },
+        { "Armor Piercing", Percent("apen", PERCENT1) },
+        { "Spell Damage", Whole("sdmg") }, { "Spell Healing", Whole("sheal") }, { "Spell Piercing", Whole("spen") },
+    } },
+    { title = "Defense", line = { 0.3, 0.55, 0.9 }, rows = {
+        { "Defense", function(st) if not st.def then return nil end return st.defmax and ("%d / %d"):format(st.def, st.defmax) or tostring(st.def) end },
+        { "Dodge", Percent("dodge", PERCENT2) }, { "Block", Percent("block", PERCENT2) }, { "Parry", Percent("parry", PERCENT2) },
+        { "Armor", Whole("armor"), tip = "armor", head = "Armor" },
+    } },
+}
+
+local ROW_H, HEADER_H, STAT_TOP = 19, 30, 66
+local statRows, statHeaders = {}, {}
+local currentStats = {}
+
+-- the colour of a group: its title and its numbers
+local function SectionColor(sec)
+    local r, g, b = math.min(1, sec.line[1] + 0.1), math.min(1, sec.line[2] + 0.1), math.min(1, sec.line[3] + 0.1)
+    return r, g, b, ("ff%02x%02x%02x"):format(math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5))
+end
+
+local function StatRow(sectionIndex, rowIndex, def)
+    local key = sectionIndex .. ":" .. rowIndex
+    local r = statRows[key]
+    if r then return r end
+    r = CreateFrame("Button", nil, statBox)
+    r:SetHeight(ROW_H)
+    r:SetPoint("LEFT", statBox, "LEFT", 8, 0)
+    r:SetPoint("RIGHT", statBox, "RIGHT", -8, 0)
+    -- a thin line under every row (no coloured stripes)
+    r.sep = r:CreateTexture(nil, "BORDER")
+    r.sep:SetHeight(1)
+    r.sep:SetPoint("BOTTOMLEFT", r, "BOTTOMLEFT", 0, 0)
+    r.sep:SetPoint("BOTTOMRIGHT", r, "BOTTOMRIGHT", 0, 0)
+    r.sep:SetColorTexture(0.3, 0.3, 0.34, 0.55)
+    r.label = r:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    r.label:SetPoint("LEFT", r, "LEFT", 6, 0)
+    r.label:SetTextColor(0.72, 0.72, 0.75)
+    r.valueText = r:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    r.valueText:SetPoint("RIGHT", r, "RIGHT", -6, 0)
+    r.def = def
+    r:SetScript("OnEnter", function(self)
+        if not self.def.tip then return end
+        local st = currentStats
+        local lines = Breakdown(self.def.tip)(st)
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:SetText(("%s %s"):format(self.def.head, self.valueText.plain or ""), 1, 1, 1)
+        for _, l in ipairs(lines) do GameTooltip:AddLine(l[1]:format(l[2] or 0), 1, 0.82, 0) end
+        GameTooltip:Show()
+    end)
+    r:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    statRows[key] = r
+    return r
+end
+
+local function StatHeader(sectionIndex, sec)
+    local h = statHeaders[sectionIndex]
+    if h then return h end
+    h = CreateFrame("Frame", nil, statBox)
+    h:SetHeight(HEADER_H)
+    h:SetPoint("LEFT", statBox, "LEFT", 8, 0)
+    h:SetPoint("RIGHT", statBox, "RIGHT", -8, 0)
+    h.label = h:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    h.label:SetPoint("CENTER", h, "CENTER", 0, -2)
+    h.label:SetText(sec.title)
+    local cr, cg, cb = SectionColor(sec)
+    h.label:SetTextColor(cr, cg, cb)
+    h.left = h:CreateTexture(nil, "ARTWORK")
+    h.left:SetHeight(1)
+    h.left:SetPoint("LEFT", h, "LEFT", 2, -2)
+    h.left:SetPoint("RIGHT", h.label, "LEFT", -8, 0)
+    h.left:SetColorTexture(sec.line[1], sec.line[2], sec.line[3], 0.9)
+    h.right = h:CreateTexture(nil, "ARTWORK")
+    h.right:SetHeight(1)
+    h.right:SetPoint("LEFT", h.label, "RIGHT", 8, 0)
+    h.right:SetPoint("RIGHT", h, "RIGHT", -2, -2)
+    h.right:SetColorTexture(sec.line[1], sec.line[2], sec.line[3], 0.9)
+    statHeaders[sectionIndex] = h
+    return h
+end
+
+local function RenderStats(profile, waiting)
+    local st = profile and profile.stats
+    for _, r in pairs(statRows) do r:Hide() end
+    for _, h in pairs(statHeaders) do h:Hide() end
+    currentStats = st or {}
+    statLevel = tonumber(profile and profile.level) or 0
+    if not st or next(st) == nil then
+        ilvlText:SetText("")
+        ilvlCaption:SetText("")
+        statNote:SetText(waiting and "Asking for stats..." or "No stats for this character.")
+        return
+    end
+    statNote:SetText("")
+    ilvlText:SetText(st.ilvl and ("%.2f"):format(st.ilvl) or "")
+    ilvlCaption:SetText(st.ilvl and "Avg item level equipped" or "")
+    local y, shown = -STAT_TOP, 0
+    for si, sec in ipairs(SECTIONS) do
+        local visible = {}
+        for ri, def in ipairs(sec.rows) do
+            local text = def[2](st)
+            if text then visible[#visible + 1] = { ri, def, text } end
+        end
+        if #visible > 0 then
+            local h = StatHeader(si, sec)
+            h:ClearAllPoints()
+            h:SetPoint("TOPLEFT", statBox, "TOPLEFT", 8, y)
+            h:SetPoint("TOPRIGHT", statBox, "TOPRIGHT", -8, y)
+            h:Show()
+            y = y - HEADER_H
+            for n, v in ipairs(visible) do
+                local r = StatRow(si, v[1], v[2])
+                r:ClearAllPoints()
+                r:SetPoint("TOPLEFT", statBox, "TOPLEFT", 8, y)
+                r:SetPoint("TOPRIGHT", statBox, "TOPRIGHT", -8, y)
+                r.label:SetText(v[2].label and v[2].label(st) or v[2][1])
+                r.valueText.plain = v[3]
+                local _, _, _, hex = SectionColor(sec)
+                r.valueText:SetText(("|c%s%s|r"):format(hex, v[3]))
+                r:Show()
+                y = y - ROW_H
+                shown = shown + 1
+            end
+        end
+    end
+    if shown == 0 then
+        statNote:SetText("No stats for this character.")
+    end
+end
+
+---------------------------------------------------------------------------
 -- Showing what we have
 ---------------------------------------------------------------------------
 local function ClassName(classFile)
@@ -489,15 +761,43 @@ local function Render()
     if profile then ns.Inspect.Normalize(profile) setups = profile.specs end
     local activeIndex = 1
     for n, sp in ipairs(setups) do if sp.active then activeIndex = n end end
-    if not insp.specIndex or insp.specIndex > #setups then insp.specIndex = activeIndex end
+    local tabs, dual = SetupTabs(setups)
+    if dual then
+        if not insp.subTab then
+            insp.subTab = 1
+            for g = 1, 2 do if tabs[g] == activeIndex then insp.subTab = g end end
+        end
+        insp.specIndex = tabs[insp.subTab]            -- nil: that talent group has not been seen yet
+    else
+        insp.subTab = nil
+        if not insp.specIndex or insp.specIndex > #setups then insp.specIndex = activeIndex end
+    end
 
     local views, trees, roles = {}, {}, {}
     for n, sp in ipairs(setups) do
         views[n] = TalentView(profile, sp)
-        if views[n] then trees[n], roles[n] = ns.Inspect.RoleFor(classFile, views[n].points) end
+        if views[n] then
+            trees[n], roles[n] = ns.Inspect.RoleFor(classFile, views[n].points)
+            if roles[n] == "FERAL" then roles[n] = ns.Inspect.FeralRole(profile, sp) end      -- Feral Tank / DPS / Hybrid (level 60 and the two talents)
+        end
     end
-    local view, why = views[insp.specIndex], (#setups == 0) and "none" or ((not views[insp.specIndex]) and "layout" or nil)
+    local view, why = insp.specIndex and views[insp.specIndex] or nil, (#setups == 0) and "none" or ((not (insp.specIndex and views[insp.specIndex])) and "layout" or nil)
+    if dual and not insp.specIndex then why = "unseen" end
     local tree, role = trees[activeIndex], roles[activeIndex]
+    -- what the character's own addon shared lately (a respec, the other specialization made active) is newer than a saved profile:
+    -- the header then shows the ACTIVE setup from it
+    local data = (ns.GetMembers() or {})[insp.guid] or m          -- (m is the roster entry; the shared data hangs on the member record)
+    local shared = data.setups and data.setups[1]
+    local sharedOther = data.setups and data.setups[2]
+    local sharedNewer = not profile or (data.setupsAt or 0) > (profile.at or 0)
+    if shared and shared.tree and shared.tree ~= "" and sharedNewer then
+        tree = shared.tree
+        role = ns.Inspect.CODE_ROLE[shared.role or ""] or role
+        if sharedOther and #setups < 2 then
+            -- (the two buttons below need a profile with both setups; the line "Other spec" does not)
+            trees[2], roles[2] = sharedOther.tree, ns.Inspect.CODE_ROLE[sharedOther.role or ""]
+        end
+    end
     local specClass = SpecAndClass(tree, role, classFile)
     classText:SetText(specClass)
     if role then
@@ -506,20 +806,22 @@ local function Render()
         roleText:SetText(Gray(views[activeIndex] and "No role yet" or "Role unknown"))
     end
     local other = ""
-    if #setups >= 2 then
+    if sharedOther and sharedNewer then
+        local r = ns.Inspect.CODE_ROLE[sharedOther.role or ""]
+        if r and ns.Inspect.ROLE_LABEL[r] then other = ("Other spec: %s (%s)"):format(ns.Inspect.ROLE_LABEL[r], sharedOther.tree or "") end
+    elseif #setups >= 2 then
         local o = (activeIndex == 1) and 2 or 1
         if roles[o] then other = ("Other spec: %s%s"):format(ns.Inspect.ROLE_LABEL[roles[o]], trees[o] and (" (" .. trees[o] .. ")") or "") end
     end
     roleTree:SetText(other)
 
-    -- spec buttons
-    for n = 1, 2 do
-        local b = specButtons[n]
-        local sp = setups[n]
-        if #setups >= 2 and sp then
-            b = SpecButton(n)
-            b:SetText(("%s%s%s"):format(trees[n] or ("Spec " .. n), roles[n] and (" · " .. ns.Inspect.ROLE_LABEL[roles[n]]) or "", sp.active and "  (active)" or ""))
-            if n == insp.specIndex then b:LockHighlight() else b:UnlockHighlight() end
+    -- the Primary / Secondary sub-tabs (only for a character with two talent groups)
+    for g = 1, 2 do
+        local b = subTabs[g]
+        if dual then
+            b = SubTab(g)
+            if g == insp.subTab then b:LockHighlight() else b:UnlockHighlight() end
+            b.glow:SetShown(tabs[g] ~= nil and tabs[g] == activeIndex)
             b:Show()
         elseif b then
             b:Hide()
@@ -576,7 +878,19 @@ local function Render()
         end
     end
 
+    local grayed = false
+    if not view and why ~= "unseen" then
+        view = EmptyView(classFile)
+        if view then grayed = true why = nil end
+    end
     RenderTalents(view, why, classFile)
+    RenderStats(profile, insp.waiting)
+    if grayed then
+        talentSummary:SetText("")
+        for _, p in ipairs(panels) do p:SetAlpha(0.45) end
+        for _, n in ipairs(nodes) do n:SetAlpha(0.45) end
+        for _, l in ipairs(lines) do if l and l.SetAlpha then l:SetAlpha(0.45) end end
+    end
 end
 
 local function Ask()
@@ -610,7 +924,7 @@ end
 function ns.UI.OpenInspect(m)
     if not (m and m.guid) then return end
     insp.guid, insp.member = m.guid, m
-    insp.specIndex = nil
+    insp.specIndex, insp.subTab = nil, nil
     Ask()
     win:Show()
     ShowTab("gear")
@@ -640,7 +954,7 @@ end)
 
 local close = K.NewButton(win, "Close")
 close:SetSize(110, 26)
-close:SetPoint("BOTTOMRIGHT", win, "BOTTOMRIGHT", -24, 22)
+close:SetPoint("BOTTOMLEFT", win, "BOTTOMLEFT", LEFT_W - 24 - 110, 22)
 close:SetScript("OnClick", function() win:Hide() end)
 
 K.RegisterCloser(function() win:Hide() end)
